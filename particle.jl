@@ -14,6 +14,10 @@ using TimerOutputs
 
 export agent_step!, make_model, color_sym, run_sim
 
+viscosity = 0.5
+time_scale = 1.0
+
+
 # define some module-local vars for tracking fps
 last_model_step_time::UInt64 = time_ns()
 avg_model_step_duration::Observable{Mean{Float64}} = Observable(Mean(weight=HarmonicWeight(30)))
@@ -39,10 +43,11 @@ function make_model(to=TimerOutput())
                             agent_step! = (args...) -> (@timeit to "agent_step!" agent_step!(args...)),
                             model_step! = (args...) -> (@timeit to "model_step!" model_step!(args...; to=to)
                             ),
-                            properties=push!(Dict{Symbol, Float64}(
-                                                lhs_rhs=>rand(range)
-                                                for (lhs_rhs, range) in properties),
-                                            :time_scale => 1.0)
+                            # properties=push!(Dict{Symbol, Float64}(
+                            #                     lhs_rhs=>rand(range)
+                            #                     for (lhs_rhs, range) in properties),
+                            #                 :time_scale => 1.0)
+                            properties=properties
                             )
 
     for c in [Red(), Green(), Orange(), Cyan()]
@@ -55,8 +60,15 @@ function make_model(to=TimerOutput())
     model
 end
 
-color_interact(lhs::ParticleColor,  rhs::ParticleColor, m::ABM) =
-    abmproperties(m)[Symbol(string(color_sym(lhs))*'_'*string(color_sym(rhs)))]
+par_order = [:green, :red, :orange, :cyan, :yellow]
+
+
+function color_interact(lhs::ParticleColor,  rhs::ParticleColor, m::ABM)
+    index_lhs = getindex(par_order, Symbol(string(color_sym(lhs))))
+    index_rhs = getindex(par_order, Symbol(string(color_sym(rhs))))
+    return abmproperties(m)[rhs, lhs]
+end
+
 
 color_sym(p::Particle) = color_sym(p.color)
 color_sym(::ParticleColor) = :black
@@ -66,34 +78,59 @@ color_sym(::Orange) = :orange
 color_sym(::Cyan) = :cyan
 color_sym(::Yellow) = :yellow
 
-properties=OrderedDict(
-    :red_red       => -1:0.1:1,
-    :red_green     => -1:0.1:1,
-    :red_orange    => -1:0.1:1,
-    :red_cyan      => -1:0.1:1,
-    :green_red     => -1:0.1:1,
-    :green_green   => -1:0.1:1,
-    :green_orange  => -1:0.1:1,
-    :green_cyan    => -1:0.1:1,
-    :orange_red    => -1:0.1:1,
-    :orange_green  => -1:0.1:1,
-    :orange_orange => -1:0.1:1,
-    :orange_cyan   => -1:0.1:1,
-    :cyan_red      => -1:0.1:1,
-    :cyan_green    => -1:0.1:1,
-    :cyan_orange   => -1:0.1:1,
-    :cyan_cyan     => -1:0.1:1,
-    :viscosity     =>  0:.01:1,
-)
 
-agent_step!(agent, model) = move_agent!(agent, model, abmproperties(model)[:time_scale])
+
+# properties=OrderedDict(
+#     :red_red       => -1:0.1:1,
+#     :red_green     => -1:0.1:1,
+#     :red_orange    => -1:0.1:1,
+#     :red_cyan      => -1:0.1:1,
+#     :green_red     => -1:0.1:1,
+#     :green_green   => -1:0.1:1,
+#     :green_orange  => -1:0.1:1,
+#     :green_cyan    => -1:0.1:1,
+#     :orange_red    => -1:0.1:1,
+#     :orange_green  => -1:0.1:1,
+#     :orange_orange => -1:0.1:1,
+#     :orange_cyan   => -1:0.1:1,
+#     :cyan_red      => -1:0.1:1,
+#     :cyan_green    => -1:0.1:1,
+#     :cyan_orange   => -1:0.1:1,
+#     :cyan_cyan     => -1:0.1:1,
+#     :viscosity     =>  0:.01:1,
+# )
+
+function create_attraction_matrix(n::Int=5)
+    return 2 .* rand(n, n) .- 1
+end
+
+function add_particle(mat::AbstractMatrix{<:Real})
+    n = size(mat, 1)
+    @assert n == size(mat, 2) "Matrix must be square"
+    new = zeros(eltype(mat), n+1, n+1)
+    new[1:n, 1:n] .= mat
+    new[n+1, 1:n] .= 2 .* rand(n) .- 1    # interactions FROM new particle to others
+    new[1:n, n+1] .= 2 .* rand(n) .- 1    # interactions TO new particle from others
+    new[n+1, n+1] = 2 * rand() - 1        # self interaction
+    return new
+end
+
+function randomize!(mat::AbstractMatrix{Float64})
+    mat .= 2 .* rand(size(mat)...) .- 1
+    return mat
+end
+
+
+properties = create_attraction_matrix()
+
+agent_step!(agent, model) = move_agent!(agent, model, time_scale)
 
 function model_step!(model; to=TimerOutput())
     @timeit to "update_vel! loop" begin
         # about 20% speedup to extract the viscosity var first.
-        viscosity::Float64 = abmproperties(model)[:viscosity]
+        vis::Float64 = viscosity
         @floop for agent in collect(allagents(model))
-            update_vel!(agent, model; viscosity=viscosity)
+            update_vel!(agent, model; viscosity=vis)
         end
     end
     @timeit to "max reduction" begin
@@ -133,66 +170,34 @@ function update_vel!(agent::Particle, model::ABM; viscosity::Union{Nothing, Floa
                  - max.(40 .- (spacesize(model) - agent.pos), 0))
 
     # combine past velocity and current force
-    viscosity = (isnothing(viscosity) ? abmproperties(model)[:viscosity] : viscosity)
     agent.vel = agent.vel * (1-viscosity) + force
 end
-
+using GLMakie
 function run_sim(; to=TimerOutput())
     # this is basically it, but we want to rearrange the layout a bit.
     model = make_model(to)
     fig, ax, abmobs = with_theme(theme_dark()) do
         abmplot(model;
-                agent_color=color_sym, agent_size=8.0,  # agent color and size
+                ac=color_sym, as=8.0,  # agent color and size
                 params=ParticleLife.properties,
                 scatterkwargs=(; :markerspace=>:data),
                 enable_inspection=false)
     end
 
-    # the rest is mostly changing the layout a bit and adding a randomize button and an fps label
-    controls = content(fig[2,1][1,1])
-    param_sliders = content(fig[2,1][1,2])
-    update_button = content(param_sliders[2,1])
-
-    # the size is currently fixed, probably not a good long-term solution
+    # Return the plotted figure without the interactive parameter sliders
+    # (the sliders expect `params` in a specific form; skip them here)
     ax.width[] = 1000
     ax.height[] = 1500
-    ui = fig[1,2] = GridLayout();
-    param_sliders.width[] = 500
-    ui[1,1] = param_sliders
-    sg::SliderGrid = content(param_sliders[1,1])
-    update_and_rand_button = param_sliders[2,1] = GridLayout();
-    update_and_rand_button[1,1] = update_button
-    rand_button = Button(update_and_rand_button[1,2], label="randomize", tellwidth=true)
-    on(rand_button.clicks) do _  # randomize params
-        for s in sg.sliders
-            set_close_to!(s, rand(s.range[]))
-        end
-        update_button.clicks[] += 1
-        abmproperties(model)[:time_scale] = 1.0
-    end
-    Label(ui[2,1], "----------------------")
-    ui[3,1] = controls
-    Label(ui[4,1], "----------------------")
-    # show fps
-    empty!(avg_model_step_duration.listeners)
-    fps = throttle(0.5, @lift 1/value($avg_model_step_duration))
-    fps_label = Label(ui[5,1], text="0.0 fps")
-    on(fps) do fps
-        fps_label.text = "$(round(fps, digits=2)) fps"
-    end
-
-    Makie.deleterow!(fig.layout, 2)
     fig
 end
 
-using GLMakie
-GLMakie.activate!()
 function make_video()
     with_theme(theme_dark()) do
-        abmvideo("foo.mp4", make_model(), agent_color=color_sym, agent_size=8.0)
+        abmvideo("/tmp/foo.mp4", make_model(), ac=color_sym, as=8.0;
+                scatterkwargs=(; :markerspace=>:data))
     end
 end
 
 end # module ParticleLife
 
-ParticleLife.make_video()
+ParticleLife.run_sim()
