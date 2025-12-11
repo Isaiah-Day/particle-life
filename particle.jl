@@ -40,14 +40,9 @@ function make_model(to=TimerOutput())
                               # spacing=20,
                               );
     model = AgentBasedModel(Particle, space2d;
-                            agent_step! = (args...) -> (@timeit to "agent_step!" agent_step!(args...)),
-                            model_step! = (args...) -> (@timeit to "model_step!" model_step!(args...; to=to)
-                            ),
-                            # properties=push!(Dict{Symbol, Float64}(
-                            #                     lhs_rhs=>rand(range)
-                            #                     for (lhs_rhs, range) in properties),
-                            #                 :time_scale => 1.0)
-                            properties=properties
+                            agent_step! = agent_step!,
+                            model_step! = (args...) -> (@timeit to "model_step!" model_step!(args...; to=to)),
+                            properties=Dict(:attraction_matrix => properties, :time_scale => 1.0)
                             )
 
     for c in [Red(), Green(), Orange(), Cyan()]
@@ -64,9 +59,16 @@ par_order = [:green, :red, :orange, :cyan, :yellow]
 
 
 function color_interact(lhs::ParticleColor,  rhs::ParticleColor, m::ABM)
-    index_lhs = getindex(par_order, Symbol(string(color_sym(lhs))))
-    index_rhs = getindex(par_order, Symbol(string(color_sym(rhs))))
-    return abmproperties(m)[rhs, lhs]
+    # index_lhs = getindex(par_order, color_sym(lhs))
+    index_lhs = findfirst(==(color_sym(lhs)), par_order)
+    index_rhs = findfirst(==(color_sym(rhs)), par_order)
+    # index_rhs = getindex(par_order, color_sym(rhs))
+    # println(abmproperties(m)[:attraction_matrix])
+    #     println(lhs)
+
+    #         println(index_lhs)
+
+    return abmproperties(m)[:attraction_matrix][index_rhs, index_lhs]
 end
 
 
@@ -123,7 +125,10 @@ end
 
 properties = create_attraction_matrix()
 
-agent_step!(agent, model) = move_agent!(agent, model, time_scale)
+function agent_step!(agent, model)
+    move_agent!(agent, model, abmproperties(model)[:time_scale])
+
+end
 
 function model_step!(model; to=TimerOutput())
     @timeit to "update_vel! loop" begin
@@ -140,15 +145,15 @@ function model_step!(model; to=TimerOutput())
         mean_vel = mean(map(x->norm(x.vel), allagents(model)))
     end
     # model.time_scale = max(0.1/max_vel, 1.)
-    if max_vel*model.time_scale > getfield(model, :space).spacing || mean_vel*model.time_scale > 30
-        model.time_scale /= 1.1
+    if max_vel*abmproperties(model)[:time_scale] > getfield(model, :space).spacing || mean_vel*abmproperties(model)[:time_scale] > 30
+        abmproperties(model)[:time_scale] /= 1.1
     end
-    if model.time_scale < 0.9
-        model.time_scale *= 1.01
-    elseif model.time_scale > 1.1
-        model.time_scale /= 1.01
+    if abmproperties(model)[:time_scale] < 0.9
+        abmproperties(model)[:time_scale] *= 1.01
+    elseif abmproperties(model)[:time_scale] > 1.1
+        abmproperties(model)[:time_scale] /= 1.01
     end
-    @debug model.time_scale
+    @debug abmproperties(model)[:time_scale]
 
     delta_time = time_ns() - ParticleLife.last_model_step_time
     ParticleLife.last_model_step_time = time_ns()
@@ -173,21 +178,83 @@ function update_vel!(agent::Particle, model::ABM; viscosity::Union{Nothing, Floa
     agent.vel = agent.vel * (1-viscosity) + force
 end
 using GLMakie
-function run_sim(; to=TimerOutput())
-    # this is basically it, but we want to rearrange the layout a bit.
-    model = make_model(to)
-    fig, ax, abmobs = with_theme(theme_dark()) do
-        abmplot(model;
-                ac=color_sym, as=8.0,  # agent color and size
-                params=ParticleLife.properties,
-                scatterkwargs=(; :markerspace=>:data),
-                enable_inspection=false)
-    end
 
-    # Return the plotted figure without the interactive parameter sliders
-    # (the sliders expect `params` in a specific form; skip them here)
-    ax.width[] = 1000
-    ax.height[] = 1500
+
+# Custom agent2string to avoid dimension mismatch in inspector
+function Agents.agent2string(model::ABM, pos)
+    return "LMAO"
+    print("LALALAND")
+    ids = nearby_agents(Particle(pos=pos, color=Red()), model, 0.00001)
+
+    print(ids)
+    if isempty(ids)
+        return "No agents at $(pos)"
+    end
+    agent_info = []
+    for id in ids
+        agent = model[id]
+        push!(agent_info, "ID: $id, Color: $(color_sym(agent)), Vel: $(agent.vel)")
+    end
+    return join(agent_info, "\n")
+    return nearby_ids(pos, model, r=0.001) |> 
+        x -> isempty(x) ? "No agents at $(pos)" : join(["ID: $id, Color: $(color_sym(model[id])), Vel: $(model[id].vel)" for id in x], "\n")
+
+end
+
+# function Agents.agent2string(model::ABM, pos)
+#     ids = nearby_ids(model, pos)
+#     s = ""
+
+#     for (i, id) in enumerate(ids)
+#         if i > 1
+#             s *= "\n"
+#         end
+#         s *= Agents.agent2string(model[id])
+#     end
+
+#     return s
+# end
+
+function run_sim(; to=TimerOutput())
+    model = make_model(to)
+  
+    
+    fig, ax= abmexploration(model; 
+                           ac=color_sym, 
+                           as=8.0,
+                           scatterkwargs=(; :markerspace=>:data))
+    
+    # abmplot!(ax, abmobs)
+    
+    # # Add control buttons
+    # step_button = Button(fig[2, 1]; label="Step Model")
+    # run_button = Button(fig[2, 2]; label="Run/Pause")
+    # reset_button = Button(fig[2, 3]; label="Reset")
+    
+    # is_running = Observable(false)
+    
+    # on(step_button.clicks) do _
+    #     step!(abmobs, 1)
+    # end
+    
+    # on(run_button.clicks) do _
+    #     is_running[] = !is_running[]
+    # end
+    
+    # on(reset_button.clicks) do _
+    #     abmobs.model[] = make_model(to)
+    # end
+    
+    # # Auto-run loop
+    # @async while true
+    #     if is_running[]
+    #         step!(abmobs, 1)
+    #         sleep(0.01)
+    #     else
+    #         sleep(0.05)
+    #     end
+    # end
+    
     fig
 end
 
