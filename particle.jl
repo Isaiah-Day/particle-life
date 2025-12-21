@@ -1,3 +1,5 @@
+# starts around 0.18-0.35
+
 module ParticleLife
 using Agents
 using Random
@@ -14,8 +16,7 @@ using TimerOutputs
 
 export agent_step!, make_model, color_sym, run_sim
 
-viscosity = 0.5
-time_scale = 1.0
+timescale_default = 10.0
 
 
 # define some module-local vars for tracking fps
@@ -36,22 +37,23 @@ end
 function make_model(to=TimerOutput())
     extent::NTuple{2, Float64} = 3 .* (500.0, 500.0);
     space2d = ContinuousSpace(extent;
-                              periodic=false,
+                              periodic=true,
                               # spacing=20,
                               );
     model = AgentBasedModel(Particle, space2d;
                             agent_step! = agent_step!,
                             model_step! = (args...) -> (@timeit to "model_step!" model_step!(args...; to=to)),
-                            properties=Dict(:attraction_matrix => properties, :time_scale => 1.0)
+                            properties=Dict(:attraction_matrix => properties, :time_scale => timescale_default, :hitbox => 0.5, :viscosity => 0.9, :max_distance => 80.0)
                             )
 
     for c in [Red(), Green(), Orange(), Cyan()]
         for _ in 1:750
-            vel =  SVector(0., 0.)
+            vel =  SVector(0, 0)
+            
             add_agent!(model, vel, c)
         end
     end
-
+    
     model
 end
 
@@ -62,11 +64,7 @@ function color_interact(lhs::ParticleColor,  rhs::ParticleColor, m::ABM)
     # index_lhs = getindex(par_order, color_sym(lhs))
     index_lhs = findfirst(==(color_sym(lhs)), par_order)
     index_rhs = findfirst(==(color_sym(rhs)), par_order)
-    # index_rhs = getindex(par_order, color_sym(rhs))
-    # println(abmproperties(m)[:attraction_matrix])
-    #     println(lhs)
 
-    #         println(index_lhs)
 
     return abmproperties(m)[:attraction_matrix][index_rhs, index_lhs]
 end
@@ -80,27 +78,11 @@ color_sym(::Orange) = :orange
 color_sym(::Cyan) = :cyan
 color_sym(::Yellow) = :yellow
 
+function Base.convert(::Type{Symbol}, a::String)
+    return Symbol("Attraction","Matrix")
+end
 
 
-# properties=OrderedDict(
-#     :red_red       => -1:0.1:1,
-#     :red_green     => -1:0.1:1,
-#     :red_orange    => -1:0.1:1,
-#     :red_cyan      => -1:0.1:1,
-#     :green_red     => -1:0.1:1,
-#     :green_green   => -1:0.1:1,
-#     :green_orange  => -1:0.1:1,
-#     :green_cyan    => -1:0.1:1,
-#     :orange_red    => -1:0.1:1,
-#     :orange_green  => -1:0.1:1,
-#     :orange_orange => -1:0.1:1,
-#     :orange_cyan   => -1:0.1:1,
-#     :cyan_red      => -1:0.1:1,
-#     :cyan_green    => -1:0.1:1,
-#     :cyan_orange   => -1:0.1:1,
-#     :cyan_cyan     => -1:0.1:1,
-#     :viscosity     =>  0:.01:1,
-# )
 
 function create_attraction_matrix(n::Int=5)
     return 2 .* rand(n, n) .- 1
@@ -127,55 +109,101 @@ properties = create_attraction_matrix()
 
 function agent_step!(agent, model)
     move_agent!(agent, model, abmproperties(model)[:time_scale])
-
 end
 
 function model_step!(model; to=TimerOutput())
+    @time begin
+    #   @floop for agent in collect(allagents(model))
+    #         # keep agents inside the bounds
+    #         for i in 1:2
+    #             if agent.pos[i] < 0
+    #                 agent.pos[i] = 0.1
+    #                 agent.vel[i] = -agent.vel[i]
+    #             elseif agent.pos[i] > spacesize(model)[i]
+    #                 agent.pos[i] = spacesize(model)[i] - 0.1
+    #                 agent.vel[i] = -agent.vel[i]    
+    #             end
+    #         end
+    #   end 
+
     @timeit to "update_vel! loop" begin
         # about 20% speedup to extract the viscosity var first.
-        vis::Float64 = viscosity
+        vis::Float64 = abmproperties(model)[:viscosity]
         @floop for agent in collect(allagents(model))
-            update_vel!(agent, model; viscosity=vis)
+            update_vel!(agent, model; vis=vis)
         end
     end
+    speeds = map(x->norm(x.vel), allagents(model))
     @timeit to "max reduction" begin
-        max_vel = maximum(map(x->norm(x.vel), allagents(model)))
+        max_vel = maximum(speeds)
     end
     @timeit to "mean reduction" begin
-        mean_vel = mean(map(x->norm(x.vel), allagents(model)))
+        mean_vel = mean(speeds)
     end
     # model.time_scale = max(0.1/max_vel, 1.)
+
+    # if maximum velocity exceeds grid spacing, reduce time scale
     if max_vel*abmproperties(model)[:time_scale] > getfield(model, :space).spacing || mean_vel*abmproperties(model)[:time_scale] > 30
         abmproperties(model)[:time_scale] /= 1.1
     end
-    if abmproperties(model)[:time_scale] < 0.9
+    # if time scale is too low, slowly increase it
+    if abmproperties(model)[:time_scale] < timescale_default*0.9
         abmproperties(model)[:time_scale] *= 1.01
-    elseif abmproperties(model)[:time_scale] > 1.1
+    elseif abmproperties(model)[:time_scale] > timescale_default*1.1
         abmproperties(model)[:time_scale] /= 1.01
     end
-    @debug abmproperties(model)[:time_scale]
+    @info "Time Scale" abmproperties(model)[:time_scale]
 
     delta_time = time_ns() - ParticleLife.last_model_step_time
     ParticleLife.last_model_step_time = time_ns()
     fit!(ParticleLife.avg_model_step_duration[], delta_time/1e9)
     notify(ParticleLife.avg_model_step_duration)  # to update the fps label
 end
+end
 
-function update_vel!(agent::Particle, model::ABM; viscosity::Union{Nothing, Float64}=nothing)
-    force = sum(
-        let g = color_interact(agent.color, other.color, model),
-            d = euclidean_distance(agent, other, model)
-            (0 < d < 80 ? (g / d .* (agent.pos - other.pos)) : zero(SVector{2, Float64}))
+function update_vel!(agent::Particle, model::ABM; vis)
+
+    hitbox = abmproperties(model)[:hitbox]
+
+
+    
+    # force = sum(
+    #     let g = color_interact(agent.color, other.color, model),
+    #         d = sqrt(sum((agent.pos .- other.pos).^2))
+    #         (d<abmproperties(model)[:max_distance] ? (0 < d < hitbox ? d/(hitbox-1) : g*(1-abs(1 + hitbox - 2 * d)/(1-hitbox))) .* (agent.pos - other.pos) : zero(SVector{2, Float64}))
+    #     end
+    #     for other in Agents.nearby_agents(agent, model, 80);
+    #     init = SVector(0.,0.),
+    # )
+    force = zero(SVector{2, Float64})
+    for other in Agents.nearby_agents(agent,model, 80)
+        # println("AGENT")
+        g = color_interact(agent.color, other.color, model)
+        d = sqrt(sum((agent.pos .- other.pos).^2))
+        if d < abmproperties(model)[:max_distance]
+            if 0 < d < hitbox
+                force += d/(hitbox-1) .* (agent.pos - other.pos)
+                # println("A")
+                # println(d/(hitbox-1) .* (agent.pos - other.pos))
+            else 
+                force += g*(1-abs(1 + hitbox - 2 * d)/(1-hitbox)) .* (agent.pos - other.pos)
+                # println("B")
+                # println(1-abs(1 + hitbox - 2 * d)/(1-hitbox))
+            end
+        else
+            force += SVector(0.,0.)
+            # println("C")
+            
         end
-        for other in Agents.nearby_agents(agent, model, 80);
-        init = zero(SVector{2, Float64}),
-    )
-    # push away from border
-    force += 0.1*(max.(40 .- agent.pos, 0)
-                 - max.(40 .- (spacesize(model) - agent.pos), 0))
+        
+    end
+    # println(force)
+
 
     # combine past velocity and current force
-    agent.vel = agent.vel * (1-viscosity) + force
+    agent.vel = agent.vel * vis + force
+    # println(agent)
+
 end
 using GLMakie
 
@@ -217,43 +245,16 @@ end
 
 function run_sim(; to=TimerOutput())
     model = make_model(to)
-  
     
+    params = Dict(
+        :timescale => abmproperties(model)[:time_scale],
+    )
+
     fig, ax= abmexploration(model; 
-                           ac=color_sym, 
-                           as=8.0,
+                           params,
+                            ac=color_sym, 
+                           as=12.0,
                            scatterkwargs=(; :markerspace=>:data))
-    
-    # abmplot!(ax, abmobs)
-    
-    # # Add control buttons
-    # step_button = Button(fig[2, 1]; label="Step Model")
-    # run_button = Button(fig[2, 2]; label="Run/Pause")
-    # reset_button = Button(fig[2, 3]; label="Reset")
-    
-    # is_running = Observable(false)
-    
-    # on(step_button.clicks) do _
-    #     step!(abmobs, 1)
-    # end
-    
-    # on(run_button.clicks) do _
-    #     is_running[] = !is_running[]
-    # end
-    
-    # on(reset_button.clicks) do _
-    #     abmobs.model[] = make_model(to)
-    # end
-    
-    # # Auto-run loop
-    # @async while true
-    #     if is_running[]
-    #         step!(abmobs, 1)
-    #         sleep(0.01)
-    #     else
-    #         sleep(0.05)
-    #     end
-    # end
     
     fig
 end
