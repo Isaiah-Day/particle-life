@@ -156,7 +156,7 @@ function update_vel!(agent::Particle, model::ABM; vis, hitbox)
     for other in Agents.nearby_agents(agent,model, 80)
         # println("AGENT")
         g = color_interact(agent.color, other.color, model)
-        d = sqrt((agent.pos .- other.pos).^2)
+        d = sqrt(sum((agent.pos .- other.pos).^2))
         if d < abmproperties(model)[:max_distance]
             if 0 < d < hitbox
                 force += d/(hitbox-1) .* (agent.pos - other.pos)
