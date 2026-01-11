@@ -1,5 +1,3 @@
-run_window = true
-
 module Sim
 using Agents
 using Random
@@ -18,9 +16,7 @@ using TimerOutputs
 
 export agent_step!, make_model, color_sym, run_sim
 
-timescale_default = 100
-frame = 0
-
+timescale_default = 50
 # define some module-local vars for tracking fps
 last_model_step_time::UInt64 = time_ns()
 avg_model_step_duration::Observable{Mean{Float64}} = Observable(Mean(weight=HarmonicWeight(30)))
@@ -37,6 +33,15 @@ struct Orange <: ParticleColor end
     steps_in_hitbox::Integer
 end
 
+
+@kwdef mutable struct Parameters
+  attraction_matrix::Matrix{Float64}
+  time_scale::Float64 = 100
+  hitbox::Float64 = 0.3
+  viscosity::Float64 = 0.95
+  max_distance::Float64 = 1
+end
+
 function make_model(;to=TimerOutput(), num_colors=4, space_size=3)
     extent::NTuple{2, Float64} = space_size .* (500.0, 500.0);
     space2d = ContinuousSpace(extent;
@@ -46,7 +51,7 @@ function make_model(;to=TimerOutput(), num_colors=4, space_size=3)
     model = AgentBasedModel(Particle, space2d;
                             agent_step! = agent_step!,
                             model_step! = (args...) -> (@timeit to "model_step!" model_step!(args...; to=to)),
-                            properties=Dict(:attraction_matrix => create_attraction_matrix(num_colors), :time_scale => timescale_default, :hitbox => 3, :viscosity => 0.95, :max_distance => 160.0)
+                            properties=(Parameters(attraction_matrix=create_attraction_matrix(num_colors)))
                             )
 
     for c in par_order[1:num_colors]
@@ -56,7 +61,7 @@ function make_model(;to=TimerOutput(), num_colors=4, space_size=3)
             add_agent!(model, vel, color_sym(c), 0)
         end
     end
-    @info abmproperties(model)[:attraction_matrix]
+    @info abmproperties(model).attraction_matrix
     model
 end
 
@@ -68,7 +73,7 @@ function color_interact(lhs::ParticleColor,  rhs::ParticleColor, m::ABM)
     index_lhs = findfirst(==(color_sym(lhs)), par_order)
     index_rhs = findfirst(==(color_sym(rhs)), par_order)
 
-    return abmproperties(m)[:attraction_matrix][index_rhs, index_lhs]
+    return abmproperties(m).attraction_matrix[index_rhs, index_lhs]
 end
 
 
@@ -91,14 +96,9 @@ function color_sym(a::Symbol)
   elseif a == :yellow
     return Yellow()
   end
-
 end
 
 
-# function Base.convert(::Type{Symbol}, a::String)
-#     return Symbol("Attraction","Matrix")
-# end
-# 
 
 
 function create_attraction_matrix(n::Int=5)
@@ -107,60 +107,46 @@ end
 
 
 function agent_step!(agent, model)
-    move_agent!(agent, model, abmproperties(model)[:time_scale])
+    move_agent!(agent, model, abmproperties(model).time_scale)
 end
 
 function model_step!(model; to=TimerOutput())
-
     @timeit to "update_vel! loop" begin
         # about 20% speedup to extract the viscosity var first.
-        vis::Float64 = abmproperties(model)[:viscosity]
-        hitbox = abmproperties(model)[:hitbox]
-        interaction_max = abmproperties(model)[:max_distance]
-        if hitbox == 1 # prevent div by zero
-          hitbox = 1.001
-        end
+        vis::Float64 = abmproperties(model).viscosity
+        hitbox001 = abmproperties(model).hitbox
+        interaction_max = abmproperties(model).max_distance
         @floop for agent in collect(allagents(model))
-            update_vel!(agent, model; vis=vis, hitbox=hitbox, interaction_max=interaction_max)
+            update_vel!(agent, model; vis=vis, hitbox=hitbox001, interaction_max=interaction_max)
         end
     end
-    global frame
-    if frame == 5
-      speeds = map(x->norm(x.vel), allagents(model))
-      @timeit to "max reduction" begin
+    speeds = map(x->norm(x.vel), allagents(model))
+    @timeit to "max reduction" begin
           max_vel = maximum(speeds)
-      end
-      @timeit to "mean reduction" begin
-          mean_vel = mean(speeds)
-      end
-      # model.time_scale = max(0.1/max_vel, 1.)
-
-      # if maximum velocity exceeds grid spacing, reduce time scale
-      if max_vel*abmproperties(model)[:time_scale] > getfield(model, :space).spacing || mean_vel*abmproperties(model)[:time_scale] > 30
-          abmproperties(model)[:time_scale] /= 1.1
-      end
-      # if time scale is too low, slowly increase it
-      if abmproperties(model)[:time_scale] < timescale_default*0.9
-          abmproperties(model)[:time_scale] *= 1.01
-      elseif abmproperties(model)[:time_scale] > timescale_default*1.1
-          abmproperties(model)[:time_scale] /= 1.01
-      end
-      frame = 0
-    else
-      frame += 1
     end
+    
+    @timeit to "mean reduction" begin
+        mean_vel = mean(speeds)
+    end
+
+    # if maximum velocity exceeds grid spacing, reduce time scale
+    if max_vel*abmproperties(model).time_scale > getfield(model, :space).spacing || mean_vel*abmproperties(model).time_scale > 30
+        abmproperties(model).time_scale /= 1.1
+    end
+    # if time scale is too low, slowly increase it
+    if abmproperties(model).time_scale < timescale_default*0.9
+        abmproperties(model).time_scale *= 1.01
+    elseif abmproperties(model).time_scale > timescale_default*1.1
+        abmproperties(model).time_scale /= 1.01
+    end
+    
     delta_time = time_ns() - Sim.last_model_step_time
     Sim.last_model_step_time = time_ns()
-
-
-
-
-
 end
 
 function update_vel!(agent::Particle, model::ABM; vis, hitbox, interaction_max)
     force = zero(SVector{2, Float64})
-    for other in Agents.nearby_agents(agent,model, 80)
+    for other in Agents.nearby_agents(agent,model, interaction_max)
         # println("AGENT")
         g = color_interact(agent.color, other.color, model)
         d = sqrt(sum((agent.pos .- other.pos).^2))/interaction_max
@@ -187,8 +173,6 @@ function update_vel!(agent::Particle, model::ABM; vis, hitbox, interaction_max)
     # println(agent)
 
 end
-using GLMakie
-
 
 function Agents.agent2string(model::ABM, pos) # because inspector is a bitch
     return "LMAO"
