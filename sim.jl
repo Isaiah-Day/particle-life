@@ -16,8 +16,7 @@ using TimerOutputs
 
 export agent_step!, make_model, color_sym, run_sim
 
-timescale_default = 50
-# define some module-local vars for tracking fps
+timescale_default = 5
 last_model_step_time::UInt64 = time_ns()
 avg_model_step_duration::Observable{Mean{Float64}} = Observable(Mean(weight=HarmonicWeight(30)))
 
@@ -38,8 +37,8 @@ end
   attraction_matrix::Matrix{Float64}
   time_scale::Float64 = 100
   hitbox::Float64 = 0.3
-  viscosity::Float64 = 0.95
-  max_distance::Float64 = 1
+  viscosity::Float64 = 0.50
+  max_distance::Float64 = 5
 end
 
 function make_model(;to=TimerOutput(), num_colors=4, space_size=3)
@@ -147,30 +146,18 @@ end
 function update_vel!(agent::Particle, model::ABM; vis, hitbox, interaction_max)
     force = zero(SVector{2, Float64})
     for other in Agents.nearby_agents(agent,model, interaction_max)
-        # println("AGENT")
-        g = color_interact(agent.color, other.color, model)
-        d = sqrt(sum((agent.pos .- other.pos).^2))/interaction_max
-        if d < 1
-            if 0 <= d < hitbox
-                force += (d/(hitbox)-1) .* (agent.pos - other.pos)
-                agent.steps_in_hitbox += 1
-                # println("A")
-                # println(d/(hitbox-1) .* (agent.pos - other.pos))
-            else
-                force += g*(1-abs(2*d - hitbox - 1)/(1-hitbox)) .* (agent.pos - other.pos)
-                # println("B")
-                # println(1-abs(1 + hitbox - 2 * d)/(1-hitbox))
-                agent.steps_in_hitbox = 0
-            end            
+        a = color_interact(agent.color, other.color, model)
+        distance = sqrt(sum((agent.pos .- other.pos).^2))/interaction_max
+
+        if distance < hitbox
+          force += (distance/hitbox + 1) .* (agent.pos - other.pos)
+        elseif hitbox < distance < 1
+          force += (a * (1- abs(2*distance-1-hitbox)/(1-hitbox))) .* (agent.pos - other.pos)
         end
-        
     end
-    # println(force)
 
-
-    # combine past velocity and current force
     agent.vel = agent.vel * vis + force * interaction_max
-    # println(agent)
+
 
 end
 
