@@ -11,12 +11,12 @@ GLMakie.activate!(
     decorated = true,
     title = "Makie"
 )
-model = make_model(;num_colors=3)
+model = make_model(;num_colors=5)
 print(model)
 
 
 fig, ax, abmobs = with_theme(theme_dark()) do 
-  abmplot(model; ac=color_sym, as=8.0, enable_inspection=false, add_controls=true, params=Dict(:viscosity => abmproperties(model)[:viscosity]) )
+  abmplot(model; ac=color_sym, as=1.0, enable_inspection=false, add_controls=true, params=Dict(:viscosity => abmproperties(model)[:viscosity]) )
 end
 
 
