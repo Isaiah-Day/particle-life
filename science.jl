@@ -1,4 +1,5 @@
 include("sim.jl")
+include("display.jl")
 using .Sim
 using Agents
 using Makie, GLMakie
@@ -14,22 +15,23 @@ function sort(divisions, m)
   sorted
 end
 
-model = make_model()
+
+function per_frame(model)
+  return
+end
+
+model = make_model(per_frame=per_frame)
 
 p = sort(4, model)[1,1]
 
 fig, ax, abmobs = with_theme(theme_dark()) do 
-  abmplot(model; ac=color_sym, as=8.0, enable_inspection=false, add_controls=true, params=Dict(:viscosity => abmproperties(model)[:viscosity]) )
+  abmplot(model; ac=color_sym, as=8.0, enable_inspection=false, add_controls=true, params=Dict(:viscosity => abmproperties(model).viscosity) )
 end
 
-size = spacesize(model)[1]
-ablines!(ax, [0,size/4,2*size/4, 3*size/4,size],[0,0,0,0,0])
+# size = spacesize(model)[1]
+# ablines!(ax, [0,size/4,2*size/4, 3*size/4,size],[0,0,0,0,0])
+# vlines!(ax, [1,size/4,2*size/4, 3*size/4,size])
+# 
 
-ablines!(ax, [0,0,0,0,0],[0,size/4,2*size/4, 3*size/4,size])
-upleft = fig[1,2]
-
-scatter(upleft, map(x -> x.pos[1], p), map(x -> x.pos[2], p), color=map(x -> color_sym(x.color), p))
-
-
-
+display(model)
 wait(display(fig))

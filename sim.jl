@@ -1,7 +1,6 @@
 module Sim
 using Agents
 using Random
-#using GLMakie, Makie
 
 import StatsBase: middle
 import StaticArraysCore: SVector, MVector
@@ -14,9 +13,11 @@ import DataStructures: DefaultDict
 using ThreadPinning
 using TimerOutputs
 
-export agent_step!, make_model, color_sym, run_sim
 
-timescale_default = 5
+
+export agent_step!, make_model, color_sym, create_attraction_matrix, model_step!, par_order
+
+timescale_default = 0.05
 last_model_step_time::UInt64 = time_ns()
 avg_model_step_duration::Observable{Mean{Float64}} = Observable(Mean(weight=HarmonicWeight(30)))
 
@@ -35,26 +36,26 @@ end
 
 @kwdef mutable struct Parameters
   attraction_matrix::Matrix{Float64}
-  time_scale::Float64 = 100
+  time_scale::Float64 = timescale_default
   hitbox::Float64 = 0.3
   viscosity::Float64 = 0.50
-  max_distance::Float64 = 5
+  max_distance::Float64 = 10
 end
 
-function make_model(;to=TimerOutput(), num_colors=4, space_size=3)
+function make_model(;to=TimerOutput(), num_colors=4, space_size=3, matrix=create_attraction_matrix(num_colors))
     extent::NTuple{2, Float64} = space_size .* (500.0, 500.0);
     space2d = ContinuousSpace(extent;
                               periodic=true,
-                              # spacing=20,
+                              #spacing=50,
                               );
     model = AgentBasedModel(Particle, space2d;
                             agent_step! = agent_step!,
                             model_step! = (args...) -> (@timeit to "model_step!" model_step!(args...; to=to)),
-                            properties=(Parameters(attraction_matrix=create_attraction_matrix(num_colors)))
+                            properties=(Parameters(attraction_matrix=matrix))
                             )
 
     for c in par_order[1:num_colors]
-      for _ in 1:(200*3)
+      for _ in 1:(300*3)
             vel =  SVector(0, 0)
             
             add_agent!(model, vel, color_sym(c), 0)
@@ -106,20 +107,23 @@ end
 
 
 function agent_step!(agent, model)
-    move_agent!(agent, model, abmproperties(model).time_scale)
+  move_agent!(agent, model, abmproperties(model).time_scale)
 end
 
 function model_step!(model; to=TimerOutput())
+  @time begin
+  @info abmproperties(model).time_scale
     @timeit to "update_vel! loop" begin
         # about 20% speedup to extract the viscosity var first.
         vis::Float64 = abmproperties(model).viscosity
         hitbox001 = abmproperties(model).hitbox
         interaction_max = abmproperties(model).max_distance
-        @floop for agent in collect(allagents(model))
+        Threads.@threads for agent in collect(allagents(model))
             update_vel!(agent, model; vis=vis, hitbox=hitbox001, interaction_max=interaction_max)
         end
     end
     speeds = map(x->norm(x.vel), allagents(model))
+  end
     @timeit to "max reduction" begin
           max_vel = maximum(speeds)
     end
@@ -129,18 +133,23 @@ function model_step!(model; to=TimerOutput())
     end
 
     # if maximum velocity exceeds grid spacing, reduce time scale
-    if max_vel*abmproperties(model).time_scale > getfield(model, :space).spacing || mean_vel*abmproperties(model).time_scale > 30
-        abmproperties(model).time_scale /= 1.1
+    #if max_vel*abmproperties(model).time_scale > getfield(model, :space).spacing || mean_vel*abmproperties(model).time_scale > 30
+    #    abmproperties(model).time_scale /= 1.5
+    #end
+    if mean_vel*abmproperties(model).time_scale > 0.1
+        abmproperties(model).time_scale /= 1.5
     end
+
+
     # if time scale is too low, slowly increase it
     if abmproperties(model).time_scale < timescale_default*0.9
-        abmproperties(model).time_scale *= 1.01
+        abmproperties(model).time_scale *= 1.001
     elseif abmproperties(model).time_scale > timescale_default*1.1
-        abmproperties(model).time_scale /= 1.01
+        abmproperties(model).time_scale /= 1.001
     end
     
-    delta_time = time_ns() - Sim.last_model_step_time
-    Sim.last_model_step_time = time_ns()
+    #delta_time = time_ns() - Sim.last_model_step_time
+    #Sim.last_model_step_time = time_ns()
 end
 
 function update_vel!(agent::Particle, model::ABM; vis, hitbox, interaction_max)
@@ -157,8 +166,6 @@ function update_vel!(agent::Particle, model::ABM; vis, hitbox, interaction_max)
     end
 
     agent.vel = agent.vel * vis + force * interaction_max
-
-
 end
 
 function Agents.agent2string(model::ABM, pos) # because inspector is a bitch
