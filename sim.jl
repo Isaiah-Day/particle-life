@@ -34,6 +34,7 @@ struct Orange <: ParticleColor end
 end
 
 
+
 @kwdef mutable struct Parameters
   attraction_matrix::Matrix{Float64}
   time_scale::Float64 = timescale_default
@@ -46,7 +47,7 @@ function make_model(;to=TimerOutput(), num_colors=4, space_size=3, matrix=create
     extent::NTuple{2, Float64} = space_size .* (500.0, 500.0);
     space2d = ContinuousSpace(extent;
                               periodic=true,
-                              #spacing=50,
+                              spacing=10,
                               );
     model = AgentBasedModel(Particle, space2d;
                             agent_step! = agent_step!,
@@ -61,7 +62,6 @@ function make_model(;to=TimerOutput(), num_colors=4, space_size=3, matrix=create
             add_agent!(model, vel, color_sym(c), 0)
         end
     end
-    @info abmproperties(model).attraction_matrix
     model
 end
 
@@ -111,8 +111,8 @@ function agent_step!(agent, model)
 end
 
 function model_step!(model; to=TimerOutput())
-  @time begin
-  @info abmproperties(model).time_scale
+
+  #@time begin
     @timeit to "update_vel! loop" begin
         # about 20% speedup to extract the viscosity var first.
         vis::Float64 = abmproperties(model).viscosity
@@ -123,7 +123,7 @@ function model_step!(model; to=TimerOutput())
         end
     end
     speeds = map(x->norm(x.vel), allagents(model))
-  end
+  #end
     @timeit to "max reduction" begin
           max_vel = maximum(speeds)
     end

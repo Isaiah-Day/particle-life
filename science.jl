@@ -1,37 +1,46 @@
 include("sim.jl")
-include("display.jl")
 using .Sim
+using Debugger
 using Agents
 using Makie, GLMakie
+using Statistics
+GLMakie.activate!(
+  vsync=false,
+  framerate=30.0,
+  float=false,
+  # pause_renderloop = false,
+  focus_on_show=false,
+  decorated=true,
+  title="Makie"
+)
 
-function sort(divisions, m)
-  sorted = [Vector{Any}() for _ in 1:divisions, _ in 1:divisions]
-  extent = spacesize(m)[1]
-  for a in allagents(m)
-    x = 1+trunc(Int, divisions*a.pos[1]/extent)
-    y = 1+trunc(Int, divisions*a.pos[2]/extent)
-    push!(sorted[y,x], a)
+
+
+function getDensity(model)
+  s = abmspace(model).spacing
+  mo = zeros(Int, trunc(Int,s^2))
+  for a in allagents(model)
+    index = ceil.(Int,a.pos./50)
+    mo[trunc(Int,index.x+index.y*s)] += 1
   end
-  sorted
+  return var(mo)
 end
 
-
-function per_frame(model)
-  return
+function func()
+dim = 100
+fractal = zeros(Int, (dim,dim))
+for i in 1:dim
+  @info i
+  for j in 1:dim
+    model = make_model(; num_colors=2, matrix=[i/dim j/dim;j/dim i/dim], space_size=0.5)
+    run!(model,200)
+    fractal[i,j] = trunc(getDensity(model))
+  end
 end
-
-model = make_model(per_frame=per_frame)
-
-p = sort(4, model)[1,1]
-
-fig, ax, abmobs = with_theme(theme_dark()) do 
-  abmplot(model; ac=color_sym, as=8.0, enable_inspection=false, add_controls=true, params=Dict(:viscosity => abmproperties(model).viscosity) )
-end
-
-# size = spacesize(model)[1]
-# ablines!(ax, [0,size/4,2*size/4, 3*size/4,size],[0,0,0,0,0])
-# vlines!(ax, [1,size/4,2*size/4, 3*size/4,size])
-# 
-
-display(model)
+fig = Figure()
+ax = Axis(fig[1,1])
+print(fractal)
+hmap = heatmap!(ax, 1:dim, 1:dim, fractal)
 wait(display(fig))
+end
+func()
