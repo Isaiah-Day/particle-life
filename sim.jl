@@ -2,9 +2,10 @@ module ParticleLifeSim
 
 using Metal
 using Random
-
 export create_model, model_step!, randomize_matrix!, reset_particles!,
   download_positions!, get_ptypes
+
+
 
 
 ### CONSTANTS ####
@@ -63,6 +64,7 @@ mutable struct ParticleModel
   attr_dirty::Bool
 end
 
+
 function create_model(;
   num_particles=NUM_PARTICLES,
   num_types=NUM_TYPES,
@@ -115,8 +117,8 @@ function _make_particles(rng, n, nt)
 end
 
 
-
-function _force_kernel!(
+### THE KERNEL ###
+function _force_kernel!( # account for forces
   fx::MtlDeviceVector{Float32},
   fy::MtlDeviceVector{Float32},
   px::MtlDeviceVector{Float32},
@@ -233,7 +235,7 @@ function _force_kernel!(
 end
 
 
-function _integrate_kernel!(
+function _integrate_kernel!( # account for dt
   px::MtlDeviceVector{Float32},
   py::MtlDeviceVector{Float32},
   vx::MtlDeviceVector{Float32},
@@ -253,7 +255,7 @@ function _integrate_kernel!(
   nx = px[i] + nvx * dt
   ny = py[i] + nvy * dt
 
-  # Wrapping (doesn't use mod bc it's to expensive)
+  # Wrapping (doesn't use mod bc it's too expensive)
   if nx >= world_sz
     nx -= world_sz
   end
@@ -275,6 +277,7 @@ function _integrate_kernel!(
 end
 
 
+### THE STEPPING ###
 function model_step!(model)
   # These are computed here bc of sliders changing them
   max_r = model.max_radius
@@ -327,7 +330,7 @@ end
 
 
 
-### DISPLAY HELPERS ###
+### MOVE TO CPU ###
 
 function download_positions!(model)
   copyto!(model.cpu_px, model.px)
