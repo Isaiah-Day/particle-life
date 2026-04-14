@@ -1,27 +1,16 @@
-module ParticleLifeSim
 
 using Metal
 using Random
 
-export create_model, model_step!, randomize_matrix!, reset_particles!,
-  download_positions!, get_ptypes
+# export create_model, model_step!, randomize_matrix!, reset_particles!, download_positions!, get_ptypes
 
-
-### CONSTANTS ####
-const NUM_TYPES = 6
-const NUM_PARTICLES = 5000
-const WORLD_SIZE = 1.0f0
-const MAX_RADIUS = 0.114f0
-const MIN_RADIUS = 0.025f0
-const FRICTION = 0.08f0
-const DT = 0.0064f0
-const FORCE_SCALE = 8.0f0
 
 # Threadgroup tile width.  
 const TILE_SIZE = 256
 
 #   Model struct                                
 mutable struct ParticleModel
+  WORLD_SIZE::Float16
   # GPU BUFFERS                    
   px::MtlArray{Float32,1}   # positions
   py::MtlArray{Float32,1}
@@ -64,8 +53,14 @@ mutable struct ParticleModel
 end
 
 function create_model(;
-  num_particles=NUM_PARTICLES,
-  num_types=NUM_TYPES,
+  num_particles=5000,
+  num_types=6,
+  world_size=1.0f0,
+  max_radius=0.114f0,
+  min_radius=0.025f0,
+  friction=0.08f0,
+  dt=0.0064f0,
+  force_scale=8.0f0,
   attraction_matrix=nothing,
   seed=42,
 )
@@ -77,9 +72,10 @@ function create_model(;
     Float32.(attraction_matrix)
   end
 
-  px, py, vx, vy, ptypes = _make_particles(rng, num_particles, num_types)
+  px, py, vx, vy, ptypes = _make_particles(rng, num_particles, num_types, world_size)
 
   ParticleModel(
+    world_size,
     # GPU buffers
     px, py, vx, vy, ptypes,
     MtlArray(zeros(Float32, num_particles)),  # gpu_fx
@@ -93,7 +89,7 @@ function create_model(;
     # Params
     mat, # attr
     Int32(num_types), Int32(num_particles),
-    DT, FRICTION, MAX_RADIUS, MIN_RADIUS, FORCE_SCALE,
+    dt, friction, max_radius, min_radius, force_scale,
     2,   # steps_per_frame default
     0,   # step_count
     rng,
@@ -104,10 +100,10 @@ function create_model(;
   )
 end
 
-function _make_particles(rng, n, nt)
+function _make_particles(rng, n, nt, world_size)
   return (
-    MtlArray(rand(rng, Float32, n) .* WORLD_SIZE),
-    MtlArray(rand(rng, Float32, n) .* WORLD_SIZE),
+    MtlArray(rand(rng, Float32, n) .* world_size),
+    MtlArray(rand(rng, Float32, n) .* world_size),
     MtlArray(zeros(Float32, n)),
     MtlArray(zeros(Float32, n)),
     MtlArray(Int32[rand(rng, 1:nt) for _ in 1:n]),
@@ -303,7 +299,7 @@ function model_step!(model)
     model.gpu_attr,
     n, model.num_types,
     max_r, max_r_sq,
-    WORLD_SIZE * 0.5f0, WORLD_SIZE, model.force_scale,
+    Float32(model.WORLD_SIZE) * 0.5f0, Float32(model.WORLD_SIZE), model.force_scale,
     beta, inv_beta, inv_mr, mid, inv_hmb,
   )
 
@@ -312,7 +308,7 @@ function model_step!(model)
     model.px, model.py,
     model.vx, model.vy,
     model.gpu_fx, model.gpu_fy,
-    n, model.dt, damping, WORLD_SIZE,
+    n, model.dt, damping, Float32(model.WORLD_SIZE),
   )
 
   model.step_count += 1
@@ -337,6 +333,84 @@ end
 
 get_ptypes(model) = Array(model.ptypes)
 
+"""
+    heatmap(model, n, threshold) -> Matrix{Float32}
+
+Returns an n²×n² matrix of particle density with adaptive refinement.
+
+The world is first divided into an n×n coarse grid.  Each coarse cell whose
+particle count exceeds `threshold` is further subdivided into its own n×n
+sub-grid, giving up to n² detail cells per coarse cell.  Cells below the
+threshold are filled with a uniform value (the coarse count spread evenly
+across the n² sub-cells they own).
+
+The returned matrix is indexed [row, col] with row 1 at the top (y-max).
+"""
+function heatmap(model, n::Int, threshold::Real)
+  N   = n * n          # output side length
+  out = zeros(Float32, N, N)
+
+  px  = model.cpu_px
+  py  = model.cpu_py
+  np  = Int(model.num_particles)
+  ws  = Float32(model.WORLD_SIZE)
+  inv_ws = 1.0f0 / ws
+
+  # ── Coarse pass ───────────────────────────────────────────────────────────
+  coarse = zeros(Int32, n, n)
+  for k in 1:np
+    cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
+    cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
+    coarse[cy, cx] += Int32(1)
+  end
+
+  # ── Fine pass: collect sub-cell counts only for hot coarse cells ──────────
+  # fine[fy, fx, cy, cx] counts particles in sub-cell (fx,fy) of coarse cell (cx,cy)
+  fine = zeros(Int32, n, n, n, n)
+  coarse_cell_size = ws / n
+  inv_ccs = 1.0f0 / coarse_cell_size
+
+  # We only need to fill fine for cells above threshold
+  hot = any(coarse .> threshold)
+  if hot
+    for k in 1:np
+      cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
+      cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
+      coarse[cy, cx] > threshold || continue
+      # position relative to coarse cell origin
+      local_x = px[k] - (cx - 1) * coarse_cell_size
+      local_y = py[k] - (cy - 1) * coarse_cell_size
+      fx = clamp(floor(Int, local_x * inv_ccs * n) + 1, 1, n)
+      fy = clamp(floor(Int, local_y * inv_ccs * n) + 1, 1, n)
+      fine[fy, fx, cy, cx] += Int32(1)
+    end
+  end
+
+  # ── Assemble output ───────────────────────────────────────────────────────
+  # Output row 0 = world y-max, so we flip cy when mapping to output rows.
+  for cy in 1:n, cx in 1:n
+    row0 = (n - cy) * n + 1   # first output row owned by this coarse cell
+    col0 = (cx - 1) * n + 1   # first output col
+
+    if coarse[cy, cx] > threshold
+      # Refined: write individual sub-cell counts
+      for fy in 1:n, fx in 1:n
+        out_row = row0 + (n - fy)   # flip fine rows too
+        out_col = col0 + (fx - 1)
+        out[out_row, out_col] = Float32(fine[fy, fx, cy, cx])
+      end
+    else
+      # Uniform: spread coarse count evenly across all n² sub-cells
+      val = Float32(coarse[cy, cx]) / Float32(n * n)
+      for fy in 1:n, fx in 1:n
+        out[row0 + (n - fy), col0 + (fx - 1)] = val
+      end
+    end
+  end
+
+  return out
+end
+
 
 ### UTILITIES ###
 function randomize_matrix!(model)
@@ -353,12 +427,12 @@ function reset_particles!(model)
 
   # Positions x
   rand!(model.rng, s)
-  s .*= WORLD_SIZE
+  s .*= Float32(model.WORLD_SIZE)
   copyto!(model.px, s)
 
   # Positions y
   rand!(model.rng, s)
-  s .*= WORLD_SIZE
+  s .*= Float32(model.WORLD_SIZE)
   copyto!(model.py, s)
 
   # Velocities
@@ -373,4 +447,3 @@ function reset_particles!(model)
   return nothing
 end
 
-end # module ParticleLifeSim

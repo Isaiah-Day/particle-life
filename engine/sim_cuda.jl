@@ -1,4 +1,3 @@
-module ParticleLifeSim
 
 using CUDA
 using KernelAbstractions
@@ -6,8 +5,7 @@ using KernelAbstractions: @kernel, @index, @localmem, @synchronize
 using Random
 using AcceleratedKernels
 
-export create_model, model_step!, randomize_matrix!, reset_particles!,
-  download_positions!, get_ptypes
+#export create_model, model_step!, randomize_matrix!, reset_particles!, download_positions!, get_ptypes
 
 
 
@@ -320,6 +318,75 @@ end
 
 get_ptypes(model) = Array(model.ptypes)
 
+"""
+    heatmap(model, n, threshold) -> Matrix{Float32}
+
+Returns an n²×n² matrix of particle density with adaptive refinement.
+
+The world is first divided into an n×n coarse grid.  Each coarse cell whose
+particle count exceeds `threshold` is further subdivided into its own n×n
+sub-grid, giving up to n² detail cells per coarse cell.  Cells below the
+threshold are filled with a uniform value (the coarse count spread evenly
+across the n² sub-cells they own).
+
+The returned matrix is indexed [row, col] with row 1 at the top (y-max).
+"""
+function heatmap(model, n::Int, threshold::Real)
+  N   = n * n
+  out = zeros(Float32, N, N)
+
+  px  = model.cpu_px
+  py  = model.cpu_py
+  np  = Int(model.num_particles)
+  ws  = WORLD_SIZE
+  inv_ws = 1.0f0 / ws
+
+  # ── Coarse pass ───────────────────────────────────────────────────────────
+  coarse = zeros(Int32, n, n)
+  for k in 1:np
+    cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
+    cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
+    coarse[cy, cx] += Int32(1)
+  end
+
+  # ── Fine pass: collect sub-cell counts only for hot coarse cells ──────────
+  fine = zeros(Int32, n, n, n, n)
+  coarse_cell_size = ws / n
+  inv_ccs = 1.0f0 / coarse_cell_size
+
+  if any(coarse .> threshold)
+    for k in 1:np
+      cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
+      cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
+      coarse[cy, cx] > threshold || continue
+      local_x = px[k] - (cx - 1) * coarse_cell_size
+      local_y = py[k] - (cy - 1) * coarse_cell_size
+      fx = clamp(floor(Int, local_x * inv_ccs * n) + 1, 1, n)
+      fy = clamp(floor(Int, local_y * inv_ccs * n) + 1, 1, n)
+      fine[fy, fx, cy, cx] += Int32(1)
+    end
+  end
+
+  # ── Assemble output ───────────────────────────────────────────────────────
+  for cy in 1:n, cx in 1:n
+    row0 = (n - cy) * n + 1
+    col0 = (cx - 1) * n + 1
+
+    if coarse[cy, cx] > threshold
+      for fy in 1:n, fx in 1:n
+        out[row0 + (n - fy), col0 + (fx - 1)] = Float32(fine[fy, fx, cy, cx])
+      end
+    else
+      val = Float32(coarse[cy, cx]) / Float32(n * n)
+      for fy in 1:n, fx in 1:n
+        out[row0 + (n - fy), col0 + (fx - 1)] = val
+      end
+    end
+  end
+
+  return out
+end
+
 
 ### UTILITIES ###
 function randomize_matrix!(model)
@@ -347,4 +414,3 @@ function reset_particles!(model)
   return nothing
 end
 
-end # module ParticleLifeSim

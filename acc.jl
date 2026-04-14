@@ -1,5 +1,4 @@
-include("sim.jl")
-using .ParticleLifeSim
+include("engine/sim_silicon.jl")
 using CairoMakie
 function sweep(R,T)
 # ── Helpers ───────────────────────────────────────────────────────────────────
