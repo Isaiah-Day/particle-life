@@ -50,6 +50,10 @@ mutable struct ParticleModel
   # Set to true whenever attraction_matrix changes on the CPU side.
   # model_step! syncs gpu_attr and clears the flag.
   attr_dirty::Bool
+
+  # Species proportions — length num_types, sums to 1.
+  # Used by reset_particles! to assign species with weighted probability.
+  species_weights::Vector{Float32}
 end
 
 function create_model(;
@@ -62,6 +66,7 @@ function create_model(;
   dt=0.0064f0,
   force_scale=8.0f0,
   attraction_matrix=nothing,
+  species_weights=nothing,
   seed=42,
 )
   rng = MersenneTwister(seed)
@@ -72,7 +77,14 @@ function create_model(;
     Float32.(attraction_matrix)
   end
 
-  px, py, vx, vy, ptypes = _make_particles(rng, num_particles, num_types, world_size)
+  weights = if species_weights === nothing
+    fill(1.0f0 / Float32(num_types), num_types)
+  else
+    w = Float32.(species_weights)
+    w ./ sum(w)
+  end
+
+  px, py, vx, vy, ptypes = _make_particles(rng, num_particles, num_types, world_size, weights)
 
   ParticleModel(
     world_size,
@@ -96,17 +108,30 @@ function create_model(;
     # Cached geometry
     cld(num_particles, TILE_SIZE),
     # Dirty flag — false because we just uploaded mat above
-    false
+    false,
+    weights,
   )
 end
 
-function _make_particles(rng, n, nt, world_size)
+function _make_particles(rng, n, nt, world_size, weights)
+  # Build species assignments using weighted sampling via cumulative distribution
+  cdf = cumsum(weights)
+  cdf[end] = 1.0f0  # guard against float rounding
+  species = Vector{Int32}(undef, n)
+  for i in 1:n
+    r = rand(rng, Float32)
+    t = 1
+    while t < nt && r > cdf[t]
+      t += 1
+    end
+    species[i] = Int32(t)
+  end
   return (
     MtlArray(rand(rng, Float32, n) .* world_size),
     MtlArray(rand(rng, Float32, n) .* world_size),
     MtlArray(zeros(Float32, n)),
     MtlArray(zeros(Float32, n)),
-    MtlArray(Int32[rand(rng, 1:nt) for _ in 1:n]),
+    MtlArray(species),
   )
 end
 
@@ -333,19 +358,8 @@ end
 
 get_ptypes(model) = Array(model.ptypes)
 
-"""
-    heatmap(model, n, threshold) -> Matrix{Float32}
 
-Returns an n²×n² matrix of particle density with adaptive refinement.
 
-The world is first divided into an n×n coarse grid.  Each coarse cell whose
-particle count exceeds `threshold` is further subdivided into its own n×n
-sub-grid, giving up to n² detail cells per coarse cell.  Cells below the
-threshold are filled with a uniform value (the coarse count spread evenly
-across the n² sub-cells they own).
-
-The returned matrix is indexed [row, col] with row 1 at the top (y-max).
-"""
 function heatmap(model, n::Int, threshold::Real)
   N   = n * n          # output side length
   out = zeros(Float32, N, N)
@@ -356,54 +370,54 @@ function heatmap(model, n::Int, threshold::Real)
   ws  = Float32(model.WORLD_SIZE)
   inv_ws = 1.0f0 / ws
 
-  # ── Coarse pass ───────────────────────────────────────────────────────────
+
+  # FIRST PASS
+  # matrix[x, y]
   coarse = zeros(Int32, n, n)
   for k in 1:np
     cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
     cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
-    coarse[cy, cx] += Int32(1)
+    coarse[cx, cy] += Int32(1)
   end
 
-  # ── Fine pass: collect sub-cell counts only for hot coarse cells ──────────
-  # fine[fy, fx, cy, cx] counts particles in sub-cell (fx,fy) of coarse cell (cx,cy)
+  # FINE PASS
+  # fine[fx, fy, cx, cy]
   fine = zeros(Int32, n, n, n, n)
   coarse_cell_size = ws / n
   inv_ccs = 1.0f0 / coarse_cell_size
 
-  # We only need to fill fine for cells above threshold
   hot = any(coarse .> threshold)
   if hot
     for k in 1:np
       cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
       cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
-      coarse[cy, cx] > threshold || continue
-      # position relative to coarse cell origin
+      if !(coarse[cx, cy] > threshold)
+        continue
+      end
       local_x = px[k] - (cx - 1) * coarse_cell_size
       local_y = py[k] - (cy - 1) * coarse_cell_size
       fx = clamp(floor(Int, local_x * inv_ccs * n) + 1, 1, n)
       fy = clamp(floor(Int, local_y * inv_ccs * n) + 1, 1, n)
-      fine[fy, fx, cy, cx] += Int32(1)
+      fine[fx, fy, cx, cy] += Int32(1)
     end
   end
 
-  # ── Assemble output ───────────────────────────────────────────────────────
-  # Output row 0 = world y-max, so we flip cy when mapping to output rows.
-  for cy in 1:n, cx in 1:n
-    row0 = (n - cy) * n + 1   # first output row owned by this coarse cell
-    col0 = (cx - 1) * n + 1   # first output col
+  # OUTPUT 
+  # out[x, y]
+  for cx in 1:n, cy in 1:n
+    col0 = (cx - 1) * n + 1   # first output x-index for this coarse column
+    row0 = (cy - 1) * n + 1   # first output y-index for this coarse row
 
-    if coarse[cy, cx] > threshold
-      # Refined: write individual sub-cell counts
-      for fy in 1:n, fx in 1:n
-        out_row = row0 + (n - fy)   # flip fine rows too
-        out_col = col0 + (fx - 1)
-        out[out_row, out_col] = Float32(fine[fy, fx, cy, cx])
+     if any(get(coarse, (cx+dx, cy+dy), 0) > threshold
+       for dx in -1:1, dy in -1:1)
+
+      for fx in 1:n, fy in 1:n
+        out[col0 + (fx - 1), row0 + (fy - 1)] = Float32(fine[fx, fy, cx, cy])
       end
     else
-      # Uniform: spread coarse count evenly across all n² sub-cells
-      val = Float32(coarse[cy, cx]) / Float32(n * n)
-      for fy in 1:n, fx in 1:n
-        out[row0 + (n - fy), col0 + (fx - 1)] = val
+      fill_val = Float32(coarse[cx, cy]) / Float32(n * n)
+      for fx in 1:n, fy in 1:n
+        out[col0 + (fx - 1), row0 + (fy - 1)] = fill_val
       end
     end
   end
@@ -423,7 +437,7 @@ end
 function reset_particles!(model)
   n = Int(model.num_particles)
   nt = Int(model.num_types)
-  s = model.cpu_scratch   #It's a prealocated vector instead of alocating a new buffer each randomize.
+  s = model.cpu_scratch
 
   # Positions x
   rand!(model.rng, s)
@@ -439,8 +453,17 @@ function reset_particles!(model)
   fill!(model.vx, 0.0f0)
   fill!(model.vy, 0.0f0)
 
-  # Species — rand! into pre-allocated scratch; no allocation
-  rand!(model.rng, model.cpu_ptypes, Int32(1):Int32(nt))
+  # Species — weighted sampling using species_weights
+  cdf = cumsum(model.species_weights)
+  cdf[end] = 1.0f0
+  for i in 1:n
+    r = rand(model.rng, Float32)
+    t = 1
+    while t < nt && r > cdf[t]
+      t += 1
+    end
+    model.cpu_ptypes[i] = Int32(t)
+  end
   copyto!(model.ptypes, model.cpu_ptypes)
 
   model.step_count = 0
