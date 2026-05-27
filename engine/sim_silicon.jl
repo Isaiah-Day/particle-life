@@ -361,64 +361,49 @@ get_ptypes(model) = Array(model.ptypes)
 
 
 function heatmap(model, n::Int, threshold::Real)
-  N   = n * n          # output side length
-  out = zeros(Float32, N, N)
+  # n = output grid side length; coarse grid = nc×nc where nc = isqrt(n)
+  nc  = isqrt(n)
+  out = zeros(Float32, n, n)
 
-  px  = model.cpu_px
-  py  = model.cpu_py
-  np  = Int(model.num_particles)
-  ws  = Float32(model.WORLD_SIZE)
+  px     = model.cpu_px
+  py     = model.cpu_py
+  np     = Int(model.num_particles)
+  ws     = Float32(model.WORLD_SIZE)
   inv_ws = 1.0f0 / ws
 
-
-  # FIRST PASS
-  # matrix[x, y]
-  coarse = zeros(Int32, n, n)
+  # COARSE PASS
+  coarse = zeros(Int32, nc, nc)
   for k in 1:np
-    cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
-    cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
+    cx = clamp(floor(Int, px[k] * inv_ws * nc) + 1, 1, nc)
+    cy = clamp(floor(Int, py[k] * inv_ws * nc) + 1, 1, nc)
     coarse[cx, cy] += Int32(1)
   end
 
-  # FINE PASS
-  # fine[fx, fy, cx, cy]
-  fine = zeros(Int32, n, n, n, n)
-  coarse_cell_size = ws / n
+  # FINE PASS — write directly into out
+  coarse_cell_size = ws / nc
   inv_ccs = 1.0f0 / coarse_cell_size
 
-  hot = any(coarse .> threshold)
-  if hot
+  if any(coarse .> threshold)
     for k in 1:np
-      cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
-      cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
-      if !(coarse[cx, cy] > threshold)
-        continue
-      end
+      cx = clamp(floor(Int, px[k] * inv_ws * nc) + 1, 1, nc)
+      cy = clamp(floor(Int, py[k] * inv_ws * nc) + 1, 1, nc)
+      coarse[cx, cy] > threshold || continue
       local_x = px[k] - (cx - 1) * coarse_cell_size
       local_y = py[k] - (cy - 1) * coarse_cell_size
-      fx = clamp(floor(Int, local_x * inv_ccs * n) + 1, 1, n)
-      fy = clamp(floor(Int, local_y * inv_ccs * n) + 1, 1, n)
-      fine[fx, fy, cx, cy] += Int32(1)
+      fx = clamp(floor(Int, local_x * inv_ccs * nc) + 1, 1, nc)
+      fy = clamp(floor(Int, local_y * inv_ccs * nc) + 1, 1, nc)
+      out[(cx - 1) * nc + fx, (cy - 1) * nc + fy] += 1.0f0
     end
   end
 
-  # OUTPUT 
-  # out[x, y]
-  for cx in 1:n, cy in 1:n
-    col0 = (cx - 1) * n + 1   # first output x-index for this coarse column
-    row0 = (cy - 1) * n + 1   # first output y-index for this coarse row
-
-     if any(get(coarse, (cx+dx, cy+dy), 0) > threshold
-       for dx in -1:1, dy in -1:1)
-
-      for fx in 1:n, fy in 1:n
-        out[col0 + (fx - 1), row0 + (fy - 1)] = Float32(fine[fx, fy, cx, cy])
-      end
-    else
-      fill_val = Float32(coarse[cx, cy]) / Float32(n * n)
-      for fx in 1:n, fy in 1:n
-        out[col0 + (fx - 1), row0 + (fy - 1)] = fill_val
-      end
+  # FILL SPARSE CELLS
+  for cx in 1:nc, cy in 1:nc
+    coarse[cx, cy] > threshold && continue
+    fill_val = Float32(coarse[cx, cy]) / Float32(nc * nc)
+    col0 = (cx - 1) * nc + 1
+    row0 = (cy - 1) * nc + 1
+    for fx in 1:nc, fy in 1:nc
+      out[col0 + (fx - 1), row0 + (fy - 1)] = fill_val
     end
   end
 

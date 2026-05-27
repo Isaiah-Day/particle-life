@@ -51,24 +51,16 @@ const CLUSTER_COLORS = [
 ]
 
 function species_cluster_heatmap(model; vel_threshold=SPECIES_VEL_THRESHOLD)
-  labels_4d = find_species(model; vel_threshold=vel_threshold)
-  n  = size(labels_4d, 1)   # coarse grid side (SPECIES_N)
-  N  = n * n                # output image side
+  labels = find_species(model; vel_threshold=vel_threshold)
+  N  = size(labels, 1)
   NC = length(CLUSTER_COLORS)
-
   img = zeros(RGBAf, N, N)
-
-  for cx in 1:n, cy in 1:n
-    col0 = (cx - 1) * n + 1
-    row0 = (cy - 1) * n + 1
-    for fx in 1:n, fy in 1:n
-      lbl = labels_4d[fx, fy, cx, cy]
-      lbl == 0 && continue
-      c = CLUSTER_COLORS[mod1(lbl, NC)]
-      img[col0 + (fx-1), row0 + (fy-1)] = RGBAf(red(c), green(c), blue(c), 0.75f0)
-    end
+  for x in 1:N, y in 1:N
+    lbl = labels[x, y]
+    lbl == 0 && continue
+    c = CLUSTER_COLORS[mod1(lbl, NC)]
+    img[x, y] = RGBAf(red(c), green(c), blue(c), 0.75f0)
   end
-
   return img
 end
 
@@ -239,7 +231,11 @@ function setup_slider_handlers!(dm, model_ref, MAX_TYPES, MAX_WEIGHT_STEPS,
   on(sl_spf.value) do v
     model_ref[].steps_per_frame = v; spf_display[] = string(v)
   end
-  on(sl_hm_n.value)   do v; dm.heatmap_n_obs[] = v;   hm_n_display[] = string(v);   end
+  on(sl_hm_n.value) do v
+    n = v * v
+    dm.heatmap_n_obs[] = n
+    hm_n_display[] = string(n)
+  end
   on(sl_hm_thr.value) do v; dm.heatmap_thr_obs[] = v; hm_thr_display[] = string(v); end
   on(sl_types.value) do nt
     types_display[] = string(nt)
@@ -387,7 +383,7 @@ function display(model::ParticleModel;
 
     colors_for(pt) = [TYPE_COLORS[mod1(Int(t), MAX_TYPES)] for t in pt]
     make_mat(m)    = make_display_mat(m, MAX_TYPES)
-    init_n         = 8
+    init_n         = 64
 
     # ── Build DisplayModel ────────────────────────────────────────────────────
     download_positions!(model_ref[])
@@ -405,10 +401,10 @@ function display(model::ParticleModel;
       Observable(false),
       Observable(init_n),
       Observable(10),
-      Observable(zeros(Float32, init_n^2, init_n^2)),
+      Observable(zeros(Float32, init_n, init_n)),
       # species
       Observable(false),
-      Observable(zeros(RGBAf, init_n, init_n)),
+      Observable(zeros(RGBAf, SPECIES_N, SPECIES_N)),
       # makeup
       [Observable(MAX_WEIGHT_STEPS ÷ MAX_TYPES) for _ in 1:MAX_TYPES],
     )
@@ -445,7 +441,7 @@ function display(model::ParticleModel;
     sl_friction = Slider(1:200; value=argmin(abs.(collect(friction_vals) .- model_ref[].friction)))
     sl_spf      = Slider(1:32;  value=model_ref[].steps_per_frame)
     sl_types    = Slider(2:MAX_TYPES; value=Int(model_ref[].num_types))
-    sl_hm_n     = Slider(3:24;  value=dm.heatmap_n_obs[])
+    sl_hm_n     = Slider(3:24;  value=isqrt(dm.heatmap_n_obs[]))
     sl_hm_thr   = Slider(1:200; value=dm.heatmap_thr_obs[])
 
     radius_display   = Observable(string(round(radius_vals[sl_radius.value[]], digits=3)))
