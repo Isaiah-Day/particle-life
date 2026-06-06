@@ -6,7 +6,7 @@ using Random
 
 
 # Threadgroup tile width.  
-const TILE_SIZE = 256
+const TILE_SIZE = 128
 
 #   Model struct                                
 mutable struct ParticleModel
