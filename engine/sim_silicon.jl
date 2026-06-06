@@ -118,13 +118,9 @@ function _make_particles(rng, n, nt, world_size, weights)
   cdf = cumsum(weights)
   cdf[end] = 1.0f0  # guard against float rounding
   species = Vector{Int32}(undef, n)
-  for i in 1:n
+  @inbounds for i in 1:n
     r = rand(rng, Float32)
-    t = 1
-    while t < nt && r > cdf[t]
-      t += 1
-    end
-    species[i] = Int32(t)
+    species[i] = Int32(searchsortedfirst(cdf, r))
   end
   return (
     MtlArray(rand(rng, Float32, n) .* world_size),
@@ -156,7 +152,7 @@ function _force_kernel!(
   inv_mr::Float32,
   mid::Float32,  # (1 + beta) / 2
   inv_hmb::Float32, # 1 / (mid-beta)
-
+  num_tiles::Int32, # cld(n, TILE_SIZE) — precomputed on CPU
 ) 
   # Threadgroup shared memory for one tile of particle data
   tile_px = MtlThreadGroupArray(Float32, TILE_SIZE)
@@ -173,8 +169,6 @@ function _force_kernel!(
   ti = valid_i ? ptypes[i] : Int32(1)
   pxi = valid_i ? px[i] : 0.0f0
   pyi = valid_i ? py[i] : 0.0f0
-
-  num_tiles = cld(n, Int32(TILE_SIZE))
 
   for tile in Int32(1):num_tiles
 
@@ -218,7 +212,7 @@ function _force_kernel!(
         end
 
         dist2 = dx * dx + dy * dy
-        (dist2 == 0.0f0 || dist2 >= max_r_sq) && continue  # don't calculate i on i force
+        (dist2 < 1.0f-8 || dist2 >= max_r_sq) && continue  # skip self and near-zero (avoids inv_dist blowup)
 
         
         #  we do it this way bc we need inv_dist later
@@ -318,14 +312,17 @@ function model_step!(model)
   n = model.num_particles
   groups = model.groups
 
+  ws = model.WORLD_SIZE
+
   @metal threads = TILE_SIZE groups = groups _force_kernel!(
     model.gpu_fx, model.gpu_fy,
     model.px, model.py, model.ptypes,
     model.gpu_attr,
     n, model.num_types,
     max_r, max_r_sq,
-    Float32(model.WORLD_SIZE) * 0.5f0, Float32(model.WORLD_SIZE), model.force_scale,
+    ws * 0.5f0, ws, model.force_scale,
     beta, inv_beta, inv_mr, mid, inv_hmb,
+    Int32(groups),
   )
 
   # Integrate
@@ -333,7 +330,7 @@ function model_step!(model)
     model.px, model.py,
     model.vx, model.vy,
     model.gpu_fx, model.gpu_fy,
-    n, model.dt, damping, Float32(model.WORLD_SIZE),
+    n, model.dt, damping, ws,
   )
 
   model.step_count += 1
@@ -360,7 +357,8 @@ get_ptypes(model) = Array(model.ptypes)
 
 
 
-function heatmap(model, n::Int, threshold::Real)
+function heatmap(model, n::Int, threshold::Int32)
+  download_positions!(model)
   # n = output grid side length; coarse grid = nc×nc where nc = isqrt(n)
   nc  = isqrt(n)
   out = zeros(Float32, n, n)
@@ -383,7 +381,7 @@ function heatmap(model, n::Int, threshold::Real)
   coarse_cell_size = ws / nc
   inv_ccs = 1.0f0 / coarse_cell_size
 
-  if any(coarse .> threshold)
+  if maximum(coarse) > threshold
     for k in 1:np
       cx = clamp(floor(Int, px[k] * inv_ws * nc) + 1, 1, nc)
       cy = clamp(floor(Int, py[k] * inv_ws * nc) + 1, 1, nc)
@@ -441,13 +439,9 @@ function reset_particles!(model)
   # Species — weighted sampling using species_weights
   cdf = cumsum(model.species_weights)
   cdf[end] = 1.0f0
-  for i in 1:n
+  @inbounds for i in 1:n
     r = rand(model.rng, Float32)
-    t = 1
-    while t < nt && r > cdf[t]
-      t += 1
-    end
-    model.cpu_ptypes[i] = Int32(t)
+    model.cpu_ptypes[i] = Int32(searchsortedfirst(cdf, r))
   end
   copyto!(model.ptypes, model.cpu_ptypes)
 
