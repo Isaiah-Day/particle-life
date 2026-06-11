@@ -3,7 +3,7 @@ using Bonito
 using Colors
 using Bonito: Observables
 
-include("species.jl")
+include("../analysis/species.jl")
 
 WGLMakie.activate!()
 
