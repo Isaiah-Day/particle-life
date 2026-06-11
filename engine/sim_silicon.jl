@@ -27,7 +27,7 @@ mutable struct ParticleModel
   cpu_py::Vector{Float32}
   # Reused during reset, avoids allocation inside reset_particles!.
   cpu_scratch::Vector{Float32}
-  cpu_ptypes::Vector{Int32}    # Int32 scratch for species randomisation (same idea)
+  cpu_ptypes::Vector{Int32}
 
   #   Simulation parameters                         ─
   attraction_matrix::Matrix{Float32}
@@ -38,22 +38,36 @@ mutable struct ParticleModel
   max_radius::Float32
   min_radius::Float32
   force_scale::Float32
-  steps_per_frame::Int    # display hint: sim steps between position downloads
+  steps_per_frame::Int    # display hint: sim steps between position downloads TODO MOVE
   step_count::Int
 
   rng::MersenneTwister
 
   #   Cached dispatch geometry                        
-  groups::Int    # cld(num_particles, TILE_SIZE) — constant, precomputed once
+  groups::Int    # cld(num_particles, TILE_SIZE), constant
 
   #   Dirty flag                               
   # Set to true whenever attraction_matrix changes on the CPU side.
   # model_step! syncs gpu_attr and clears the flag.
   attr_dirty::Bool
 
-  # Species proportions — length num_types, sums to 1.
+  # Species proportions: length num_types, sums to 1.
   # Used by reset_particles! to assign species with weighted probability.
   species_weights::Vector{Float32}
+
+  # GRID STUFF
+  # Grid dimensions (recomputed when max_radius changes).
+  grid_w::Int32
+  grid_h::Int32
+  # Per-particle cell id (0-based flat index into grid).
+  gpu_cell_ids::MtlArray{Int32,1}      # [n]
+  gpu_sorted_order::MtlArray{Int32,1}  # [n]  1-based particle indices sorted by cell
+  gpu_cell_start::MtlArray{Int32,1}    # [grid_w*grid_h]  first sorted_order index for cell
+  gpu_cell_end::MtlArray{Int32,1}      # [grid_w*grid_h]  one-past-last index for cell
+  cpu_cell_ids::Vector{Int32}
+  cpu_sorted_order::Vector{Int32}
+  cpu_cell_start::Vector{Int32}
+  cpu_cell_end::Vector{Int32}
 end
 
 function create_model(;
@@ -62,7 +76,7 @@ function create_model(;
   world_size=1.0f0,
   max_radius=0.114f0,
   min_radius=0.025f0,
-  friction=0.08f0,
+  friction=0.3f0,
   dt=0.0064f0,
   force_scale=8.0f0,
   attraction_matrix=nothing,
@@ -86,30 +100,43 @@ function create_model(;
 
   px, py, vx, vy, ptypes = _make_particles(rng, num_particles, num_types, world_size, weights)
 
+  n = num_particles
+  gw = max(Int32(1), Int32(floor(world_size / max_radius)))
+  gh = gw
+  ncells = Int(gw) * Int(gh)
+
   ParticleModel(
     world_size,
     # GPU buffers
     px, py, vx, vy, ptypes,
-    MtlArray(zeros(Float32, num_particles)),  # gpu_fx
-    MtlArray(zeros(Float32, num_particles)),  # gpu_fy
-    MtlArray(vec(mat)),                       # gpu_attr  
+    MtlArray(zeros(Float32, n)),   # gpu_fx
+    MtlArray(zeros(Float32, n)),   # gpu_fy
+    MtlArray(vec(mat)),            # gpu_attr
     # CPU buffers
-    Vector{Float32}(undef, num_particles),    # cpu_px
-    Vector{Float32}(undef, num_particles),    # cpu_py
-    Vector{Float32}(undef, num_particles),    # cpu_scratch
-    Vector{Int32}(undef, num_particles),      # cpu_ptypes
+    Vector{Float32}(undef, n),     # cpu_px
+    Vector{Float32}(undef, n),     # cpu_py
+    Vector{Float32}(undef, n),     # cpu_scratch
+    Vector{Int32}(undef, n),       # cpu_ptypes
     # Params
-    mat, # attr
-    Int32(num_types), Int32(num_particles),
+    mat,
+    Int32(num_types), Int32(n),
     dt, friction, max_radius, min_radius, force_scale,
-    2,   # steps_per_frame default
+    2,   # steps_per_frame
     0,   # step_count
     rng,
-    # Cached geometry
-    cld(num_particles, TILE_SIZE),
-    # Dirty flag — false because we just uploaded mat above
+    cld(n, TILE_SIZE),
     false,
     weights,
+    # Spatial hash
+    gw, gh,
+    MtlArray(zeros(Int32, n)),         # gpu_cell_ids
+    MtlArray(zeros(Int32, n)),         # gpu_sorted_order
+    MtlArray(zeros(Int32, ncells)),    # gpu_cell_start
+    MtlArray(zeros(Int32, ncells)),    # gpu_cell_end
+    Vector{Int32}(undef, n),           # cpu_cell_ids
+    Vector{Int32}(undef, n),           # cpu_sorted_order
+    Vector{Int32}(undef, ncells),      # cpu_cell_start
+    Vector{Int32}(undef, ncells),      # cpu_cell_end
   )
 end
 
@@ -133,117 +160,112 @@ end
 
 
 
+function _compute_cells_kernel!(
+  cell_ids::MtlDeviceVector{Int32},
+  px::MtlDeviceVector{Float32},
+  py::MtlDeviceVector{Float32},
+  n::Int32,
+  inv_max_r::Float32,
+  grid_w::Int32,
+  grid_h::Int32,
+)
+  i = thread_position_in_grid_1d()
+  i > n && return nothing
+  cx = min(unsafe_trunc(Int32, px[i] * inv_max_r), grid_w - Int32(1))
+  cy = min(unsafe_trunc(Int32, py[i] * inv_max_r), grid_h - Int32(1))
+  cell_ids[i] = cx + cy * grid_w   # 0-based flat cell index
+  return nothing
+end
+
+
 function _force_kernel!(
   fx::MtlDeviceVector{Float32},
   fy::MtlDeviceVector{Float32},
   px::MtlDeviceVector{Float32},
   py::MtlDeviceVector{Float32},
   ptypes::MtlDeviceVector{Int32},
+  sorted_order::MtlDeviceVector{Int32},
+  cell_start::MtlDeviceVector{Int32},
+  cell_end::MtlDeviceVector{Int32},
   attraction::MtlDeviceVector{Float32},
-  n::Int32, # num particles
+  n::Int32,
   num_types::Int32,
   max_r::Float32,
-  max_r_sq::Float32,   
+  max_r_sq::Float32,
   half_w::Float32,
   world_sz::Float32,
   fscale::Float32,
-  beta::Float32, # min_r / max_r
-  inv_beta::Float32,   
+  beta::Float32,
+  inv_beta::Float32,
   inv_mr::Float32,
-  mid::Float32,  # (1 + beta) / 2
-  inv_hmb::Float32, # 1 / (mid-beta)
-  num_tiles::Int32, # cld(n, TILE_SIZE) — precomputed on CPU
-) 
-  # Threadgroup shared memory for one tile of particle data
-  tile_px = MtlThreadGroupArray(Float32, TILE_SIZE)
-  tile_py = MtlThreadGroupArray(Float32, TILE_SIZE)
-  tile_pt = MtlThreadGroupArray(Int32, TILE_SIZE)
-
+  mid::Float32,
+  inv_hmb::Float32,
+  grid_w::Int32,
+  grid_h::Int32,
+)
   i = thread_position_in_grid_1d()
-  li = thread_position_in_threadgroup_1d() # index in group
+  i > n && return nothing
 
-
-  valid_i = i <= n
-  fxi = 0.0f0 # force accumalators
+  pxi = px[i]
+  pyi = py[i]
+  ti  = ptypes[i]
+  fxi = 0.0f0
   fyi = 0.0f0
-  ti = valid_i ? ptypes[i] : Int32(1)
-  pxi = valid_i ? px[i] : 0.0f0
-  pyi = valid_i ? py[i] : 0.0f0
 
-  for tile in Int32(1):num_tiles
+  # Coarse cell of particle i
+  cx = min(unsafe_trunc(Int32, pxi / max_r), grid_w - Int32(1))
+  cy = min(unsafe_trunc(Int32, pyi / max_r), grid_h - Int32(1))
 
-    # Each thread loads one particle into shared memory.
-    j_load = (tile - Int32(1)) * Int32(TILE_SIZE) + li # particle index in px, py and ptypes
-    if j_load <= n
-      tile_px[li] = px[j_load]
-      tile_py[li] = py[j_load]
-      tile_pt[li] = ptypes[j_load]
-    else
-      # Padding, tile_count below ensures these are never visited.
-      tile_px[li] = 0.0f0
-      tile_py[li] = 0.0f0
-      tile_pt[li] = Int32(1)
-    end
+  for dy in Int32(-1):Int32(1)
+    for dx in Int32(-1):Int32(1)
+      nx = mod(cx + dx, grid_w)
+      ny = mod(cy + dy, grid_h)
+      cell = nx + ny * grid_w + Int32(1)   # +1 bc julia is one-based
 
-    threadgroup_barrier(Metal.MemoryFlagThreadGroup) # all threads wait before using shared memory
+      kstart = cell_start[cell]
+      kend   = cell_end[cell]
+      kstart > kend && continue
 
-    # Accumulate forces from this tile
-    if valid_i
-      # How many real particles are in this (possibly partial last) tile
-      tile_count = min(Int32(TILE_SIZE), n - (tile - Int32(1)) * Int32(TILE_SIZE))
+      for k in kstart:kend
+        j = sorted_order[k]
 
-      for lj in Int32(1):tile_count
-        # displacement from i to j
-        dx = tile_px[lj] - pxi
-        dy = tile_py[lj] - pyi
+        dx2 = px[j] - pxi
+        dy2 = py[j] - pyi
 
         # space wrapping
-        if dx > half_w
-          dx -= world_sz
-        end
-        if dx < -half_w
-          dx += world_sz
-        end
-        if dy > half_w
-          dy -= world_sz
-        end
-        if dy < -half_w
-          dy += world_sz
-        end
+        if dx2 >  half_w; dx2 -= world_sz; end
+        if dx2 < -half_w; dx2 += world_sz; end
+        if dy2 >  half_w; dy2 -= world_sz; end
+        if dy2 < -half_w; dy2 += world_sz; end
 
-        dist2 = dx * dx + dy * dy
-        (dist2 < 1.0f-8 || dist2 >= max_r_sq) && continue  # skip self and near-zero (avoids inv_dist blowup)
+        # More precompute
+        # "blazingly fast"
+        dist2 = dx2 * dx2 + dy2 * dy2
+        (dist2 < 1.0f-8 || dist2 >= max_r_sq) && continue
 
-        
-        #  we do it this way bc we need inv_dist later
         inv_dist = 1.0f0 / sqrt(dist2)
         dist = dist2 * inv_dist
 
-        tj = tile_pt[lj]
-        a = attraction[(tj-Int32(1))*num_types+ti]
-        
+        tj = ptypes[j]
+        a  = attraction[(tj - Int32(1)) * num_types + ti]
 
-        # ACTUAL PL COMPUTATION (remember mult is faster on gpu than div, so we mult by inv_X)
-        r = dist * inv_mr           
+        # Actual PL Calc
+        r = dist * inv_mr
         f = if r < beta
-          -(1.0f0 - r * inv_beta)       
+          -(1.0f0 - r * inv_beta)
         else
           a * (1.0f0 - abs(r - mid) * inv_hmb)
         end
 
-        inv_d = fscale * inv_dist     
-        fxi += f * dx * inv_d
-        fyi += f * dy * inv_d
+        inv_d = fscale * inv_dist
+        fxi += f * dx2 * inv_d
+        fyi += f * dy2 * inv_d
       end
     end
-
-    threadgroup_barrier(Metal.MemoryFlagThreadGroup) # all threads sync before overwriting shared memory
   end
 
-  if valid_i
-    fx[i] = fxi
-    fy[i] = fyi
-  end
+  fx[i] = fxi
+  fy[i] = fyi
   return nothing
 end
 
@@ -291,42 +313,92 @@ end
 
 
 function model_step!(model)
-  # These are computed here bc of sliders changing them
-  max_r = model.max_radius
-  max_r_sq = max_r * max_r                
-  beta = model.min_radius / max_r
-  inv_beta = 1.0f0 / beta              # precomputed: avoids r/beta divide in kernel
+  # Precompute
+  max_r  = model.max_radius
+  max_r_sq = max_r * max_r
+  beta   = model.min_radius / max_r
+  inv_beta = 1.0f0 / beta
   inv_mr = 1.0f0 / max_r
-  mid = (1.0f0 + beta) * 0.5f0
-  # mid − beta = (1+β)/2 − β = (1−β)/2,  so inv_hmb = 2/(1−β)
+  mid    = (1.0f0 + beta) * 0.5f0
   inv_hmb = 2.0f0 / (1.0f0 - beta)
   damping = 1.0f0 - model.friction
 
-  # Sync attr
   if model.attr_dirty
     copyto!(model.gpu_attr, vec(model.attraction_matrix))
     model.attr_dirty = false
   end
 
-  # Get forces
-  n = model.num_particles
+  n  = model.num_particles
+  ws = Float32(model.WORLD_SIZE)
   groups = model.groups
 
-  ws = model.WORLD_SIZE
+  ### BULD GRID
 
-  @metal threads = TILE_SIZE groups = groups _force_kernel!(
+  # # Recompute grid dims if max_radius changed
+  # new_gw = max(Int32(1), Int32(floor(ws / max_r)))
+  # new_gh = new_gw
+  # if new_gw != model.grid_w || new_gh != model.grid_h
+  #   ncells = Int(new_gw) * Int(new_gh)
+  #   model.grid_w = new_gw
+  #   model.grid_h = new_gh
+  #   model.gpu_cell_start = MtlArray(zeros(Int32, ncells))
+  #   model.gpu_cell_end   = MtlArray(zeros(Int32, ncells))
+  #   model.cpu_cell_start = Vector{Int32}(undef, ncells)
+  #   model.cpu_cell_end   = Vector{Int32}(undef, ncells)
+  # end
+
+  gw = model.grid_w
+  gh = model.grid_h
+
+  # Assign each particle on a cell
+  @metal threads=TILE_SIZE groups=groups _compute_cells_kernel!(
+    model.gpu_cell_ids, model.px, model.py,
+    n, inv_mr, gw, gh,
+  )
+
+  # Download sorted and cell ids to the cpu
+  # TODO: Why is this not in download_positions!
+  copyto!(model.cpu_cell_ids, model.gpu_cell_ids)
+  sortperm!(model.cpu_sorted_order, model.cpu_cell_ids)
+  copyto!(model.gpu_sorted_order, model.cpu_sorted_order)
+
+  # Build cell_start and cell_end on CPU
+  ncells = Int(gw) * Int(gh)
+  fill!(model.cpu_cell_start, Int32(0))
+  fill!(model.cpu_cell_end,   Int32(0))
+  prev_cell = Int32(-1)
+  for k in 1:Int(n)
+    cell = model.cpu_cell_ids[model.cpu_sorted_order[k]] + Int32(1)  # 1-based
+    if cell != prev_cell
+      if prev_cell >= Int32(1)
+        model.cpu_cell_end[prev_cell] = Int32(k - 1)
+      end
+      model.cpu_cell_start[cell] = Int32(k)
+      prev_cell = cell
+    end
+  end
+  if prev_cell >= Int32(1)
+    model.cpu_cell_end[prev_cell] = n
+  end
+  copyto!(model.gpu_cell_start, model.cpu_cell_start)
+  copyto!(model.gpu_cell_end,   model.cpu_cell_end)
+
+  ### FORCE KERNEL
+  @metal threads=TILE_SIZE groups=groups _force_kernel!(
     model.gpu_fx, model.gpu_fy,
     model.px, model.py, model.ptypes,
+    model.gpu_sorted_order,
+    model.gpu_cell_start, model.gpu_cell_end,
     model.gpu_attr,
     n, model.num_types,
     max_r, max_r_sq,
     ws * 0.5f0, ws, model.force_scale,
     beta, inv_beta, inv_mr, mid, inv_hmb,
-    Int32(groups),
+    gw, gh,
   )
 
-  # Integrate
-  @metal threads = TILE_SIZE groups = groups _integrate_kernel!(
+  ### INTEGRATE
+  @metal threads=TILE_SIZE groups=groups _integrate_kernel!(
     model.px, model.py,
     model.vx, model.vy,
     model.gpu_fx, model.gpu_fy,
@@ -357,9 +429,10 @@ get_ptypes(model) = Array(model.ptypes)
 
 
 
-function heatmap(model, n::Int, threshold::Int32)
+function heatmap(model, n::Int, threshold::Int)
   download_positions!(model)
-  # n = output grid side length; coarse grid = nc×nc where nc = isqrt(n)
+  # n = output grid side length
+  # coarse grid = nc×nc where nc = isqrt(n)
   nc  = isqrt(n)
   out = zeros(Float32, n, n)
 
@@ -409,6 +482,23 @@ function heatmap(model, n::Int, threshold::Int32)
 end
 
 
+function heatmap_slow(model, n::Int)
+  download_positions!(model)
+  out    = zeros(Float32, n, n)
+  px     = model.cpu_px
+  py     = model.cpu_py
+  np     = Int(model.num_particles)
+  ws     = Float32(model.WORLD_SIZE)
+  inv_ws = 1.0f0 / ws
+  for k in 1:np
+    cx = clamp(floor(Int, px[k] * inv_ws * n) + 1, 1, n)
+    cy = clamp(floor(Int, py[k] * inv_ws * n) + 1, 1, n)
+    out[cx, cy] += 1.0f0
+  end
+  return out
+end
+
+
 ### UTILITIES ###
 function randomize_matrix!(model)
   nt = Int(model.num_types)
@@ -436,7 +526,7 @@ function reset_particles!(model)
   fill!(model.vx, 0.0f0)
   fill!(model.vy, 0.0f0)
 
-  # Species — weighted sampling using species_weights
+  # Species: weighted sampling using species_weights
   cdf = cumsum(model.species_weights)
   cdf[end] = 1.0f0
   @inbounds for i in 1:n
