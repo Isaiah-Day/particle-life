@@ -30,11 +30,11 @@ mutable struct ParticleModel
     attraction_matrix::Matrix{Float32}
     num_types::Int32
     num_particles::Int32
-    dt::Float32
-    friction::Float32
-    max_radius::Float32
-    min_radius::Float32
-    force_scale::Float32
+    dt::AbstractFloat
+    friction::AbstractFloat
+    max_radius::AbstractFloat
+    min_radius::AbstractFloat
+    force_scale::AbstractFloat
     steps_per_frame::Int    # display hint: sim steps between position downloads TODO MOVE
     step_count::Int
 

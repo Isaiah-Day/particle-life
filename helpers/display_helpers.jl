@@ -1,7 +1,7 @@
 using GLMakie
 using ParticleLife
 
-function frame(m)
+function frame(m::ParticleModel)
     @async begin
         download_positions!(m)
         set_theme!(theme_black())
@@ -27,7 +27,7 @@ function frame_org(m)
         ax = Axis(f[1, 1])
 
         organisms = find_organisms(m; eps=0.2)
-        organisms_new = zeros(len(m.cpu_px))
+        organisms_new = zeros(length(m.cpu_px))
 
         index = 1
         for list in organisms
@@ -45,6 +45,6 @@ function frame_org(m)
             colormap=:curl,
             markersize=3,
         )
-        return f
+        display(f)
     end
 end

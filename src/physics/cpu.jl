@@ -1,5 +1,4 @@
 export download_positions!, heatmap, heatmap_slow, get_ptypes
-include("model.jl")
 
 function download_positions!(model::ParticleModel)
     copyto!(model.cpu_px, model.px)

@@ -1,6 +1,5 @@
 export find_species
 
-include("../physics/model.jl")
 
 const SPECIES_N = 64   # output grid side (nc = isqrt(64) = 8 coarse cells)
 const SPECIES_HM_THRESHOLD = 14

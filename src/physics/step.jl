@@ -1,5 +1,4 @@
 export model_step!
-include("model.jl")
 using Metal
 function _compute_cells_kernel!(
     cell_ids::MtlDeviceVector{Int32},

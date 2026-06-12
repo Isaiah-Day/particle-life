@@ -1,6 +1,6 @@
 name = "ParticleLife"
 uuid = "289bf889-5307-48b8-b6b6-80a5f109c702"
-version = "0.1.0"
+version = "0.0.0"
 authors = ["Isaiah Day <66925301+Isaiah-Day@users.noreply.github.com>"]
 
 [deps]
@@ -11,7 +11,9 @@ GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
 NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
 
 [compat]
 Random = "1.11.0"
+Test = "1.11.0"
