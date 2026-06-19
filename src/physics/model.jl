@@ -5,7 +5,34 @@ using Metal
 # Threadgroup tile width.  
 const TILE_SIZE = 128
 
-#   Model struct                                
+
+"""
+    mutable struct ParticleModel
+        WORLD_SIZE::Float16
+
+        # GPU Buffers
+        ...
+
+        cpu_px::Vector{Float32}
+        cpu_py::Vector{Float32}
+        cpu_ptypes::Vector{Int32} # Use `get_ptypes`
+
+        attraction_matrix::Matrix{Float32}
+        num_types::Int32
+        num_particles::Int32
+        dt::AbstractFloat
+        friction::AbstractFloat
+        max_radius::AbstractFloat
+        min_radius::AbstractFloat
+        force_scale::AbstractFloat
+        step_count::Int
+
+        rng::MersenneTwister
+    end
+
+Contains a world in ParticleLife.
+Note that although the struct is mutable,
+"""
 mutable struct ParticleModel
     WORLD_SIZE::Float16
     # GPU BUFFERS                    
@@ -167,12 +194,35 @@ function _make_particles(rng, n, nt, world_size, weights)
     )
 end
 
+
+
+
+
+
+
+
+
+
+
+"""
+    randomize_matrix(model::ParticleModel)
+
+Randomize the matrix of `model`
+"""
 function randomize_matrix!(model::ParticleModel)
     nt = Int(model.num_types)
     model.attraction_matrix .= rand(model.rng, Float32, nt, nt) .* 2.0f0 .- 1.0f0
     return model.attr_dirty = true # gpu pays attention
 end
 
+
+
+"""
+    reset_particles!(model::ParticleModel)
+
+Reset all particles in `model`.
+Should be called to update 
+"""
 function reset_particles!(model::ParticleModel)
     n = Int(model.num_particles)
     nt = Int(model.num_types)

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Julia ${{ matrix.julia-version }} — macOS (Metal)
+    runs-on: macos-latest 
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version:
+          - "1.12.5"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Julia ${{ matrix.julia-version }}
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+          arch: aarch64     
+
+      - name: Restore Julia package cache
+        uses: julia-actions/cache@v2
+
+      - name: Build package
+        uses: julia-actions/julia-buildpkg@v1
+
+      - name: Verify Metal backend is available
+        shell: julia --color=yes --project=. {0}
+        run: |
+          using Pkg
+          Pkg.add("Metal")
+          using Metal
+          @assert Metal.functional() "Metal is not functional on this runner — tests will be skipped or may fail."
+          @info "Metal device: $(Metal.current_device())"
+
+      - name: Run tests
+        uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_NUM_THREADS: auto
+          # Disable GPU-related memory limits if needed
+          METAL_CAPTURE_ENABLED: "0"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: lcov.info
+          fail_ci_if_error: false

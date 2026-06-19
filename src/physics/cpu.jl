@@ -6,6 +6,13 @@ function download_positions!(model::ParticleModel)
     return nothing
 end
 
+
+function distance(model::ParticleModel, i::Int, j::Int)
+    dx = model.cpu_px[i] - model.cpu_px[j]
+    dy = model.cpu_py[i] - model.cpu_py[j]
+    return sqrt(dx * dx + dy * dy)
+end
+
 get_ptypes(model::ParticleModel) = Array(model.ptypes)
 
 function heatmap(model::ParticleModel, n::Int, threshold::Int)

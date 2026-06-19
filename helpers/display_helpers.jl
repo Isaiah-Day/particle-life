@@ -16,19 +16,19 @@ function frame(m::ParticleModel)
             colormap=:curl,
             markersize=3,
         )
-        return display(f)
+        return wait(display(f))
     end
 end
 
 function frame_org(m)
     @async begin
+        download_positions!(m)
         set_theme!(theme_black())
         f = Figure()
         ax = Axis(f[1, 1])
 
         organisms = find_organisms(m; eps=0.2)
-        organisms_new = zeros(length(m.cpu_px))
-
+        organisms_new = fill(100, length(m.cpu_px))
         index = 1
         for list in organisms
             for el in list
@@ -37,14 +37,15 @@ function frame_org(m)
             index += 1
         end
 
+
         scatter!(
             ax,
             m.cpu_px,
             m.cpu_py;
-            color=ParticleLife.get_ptypes(m),
+            color=organisms_new,
             colormap=:curl,
             markersize=3,
         )
-        display(f)
+        wait(display(f))
     end
 end
