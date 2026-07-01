@@ -1,22 +1,23 @@
 export ParticleModel, create_model, randomize_matrix!, reset_particles!
 
 using Random
-using Metal
+using KernelAbstractions
+using GPUSelect
 # Threadgroup tile width.  
 const TILE_SIZE = 128
 
 #   Model struct                                
-mutable struct ParticleModel
+mutable struct ParticleModel{}
     WORLD_SIZE::Float16
     # GPU BUFFERS                    
-    px::MtlArray{Float32,1}   # positions
-    py::MtlArray{Float32,1}
-    vx::MtlArray{Float32,1}   # velocities
-    vy::MtlArray{Float32,1}
-    ptypes::MtlArray{Int32,1}   # species index 1..num_types
-    gpu_fx::MtlArray{Float32,1}   # forces
-    gpu_fy::MtlArray{Float32,1}
-    gpu_attr::MtlArray{Float32,1}   # flattened attraction matrix
+    px::AbstractVector{Float32}   # positions
+    py::AbstractVector{Float32}
+    vx::AbstractVector{Float32}   # velocities
+    vy::AbstractVector{Float32}
+    ptypes::AbstractVector{Int32}   # species index 1..num_types
+    gpu_fx::AbstractVector{Float32}   # forces
+    gpu_fy::AbstractVector{Float32}
+    gpu_attr::AbstractVector{Float32}   # flattened attraction matrix
 
     #  CPU BUFFERS                    ─
     # Reused every frame, download_positions! writes into these in-place.
@@ -57,14 +58,18 @@ mutable struct ParticleModel
     grid_w::Int32
     grid_h::Int32
     # Per-particle cell id (0-based flat index into grid).
-    gpu_cell_ids::MtlArray{Int32,1}      # [n]
-    gpu_sorted_order::MtlArray{Int32,1}  # [n]  1-based particle indices sorted by cell
-    gpu_cell_start::MtlArray{Int32,1}    # [grid_w*grid_h]  first sorted_order index for cell
-    gpu_cell_end::MtlArray{Int32,1}      # [grid_w*grid_h]  one-past-last index for cell
+    gpu_cell_ids::AbstractVector{Int32}    # [n]
+    gpu_sorted_order::AbstractVector{Int32}  # [n]  1-based particle indices sorted by cell
+    gpu_cell_start::AbstractVector{Int32}    # [grid_w*grid_h]  first sorted_order index for cell
+    gpu_cell_end::AbstractVector{Int32}      # [grid_w*grid_h]  one-past-last index for cell
     cpu_cell_ids::Vector{Int32}
     cpu_sorted_order::Vector{Int32}
     cpu_cell_start::Vector{Int32}
     cpu_cell_end::Vector{Int32}
+
+
+    # Backend
+    backend::Union{<:KernelAbstractions.GPU, KernelAbstractions.CPU}
 end
 
 function create_model(;
@@ -79,6 +84,7 @@ function create_model(;
     attraction_matrix=nothing,
     species_weights=nothing,
     seed=42,
+    backend = GPUSelect.Backend()
 )
     rng = MersenneTwister(seed)
 
@@ -96,7 +102,7 @@ function create_model(;
     end
 
     px, py, vx, vy, ptypes = _make_particles(
-        rng, num_particles, num_types, world_size, weights
+        rng, num_particles, num_types, world_size, weights, backend
     )
 
     n = num_particles
@@ -112,9 +118,9 @@ function create_model(;
         vx,
         vy,
         ptypes,
-        MtlArray(zeros(Float32, n)),   # gpu_fx
-        MtlArray(zeros(Float32, n)),   # gpu_fy
-        MtlArray(vec(mat)),            # gpu_attr
+        GPUArray(backend, zeros(Float32, n)),   # gpu_fx
+        GPUArray(backend, zeros(Float32, n)),   # gpu_fy
+        GPUArray(backend, vec(mat)),            # gpu_attr
         # CPU buffers
         Vector{Float32}(undef, n),     # cpu_px
         Vector{Float32}(undef, n),     # cpu_py
@@ -138,18 +144,19 @@ function create_model(;
         # Spatial hash
         gw,
         gh,
-        MtlArray(zeros(Int32, n)),         # gpu_cell_ids
-        MtlArray(zeros(Int32, n)),         # gpu_sorted_order
-        MtlArray(zeros(Int32, ncells)),    # gpu_cell_start
-        MtlArray(zeros(Int32, ncells)),    # gpu_cell_end
+        GPUArray(backend, zeros(Int32, n)),         # gpu_cell_ids
+        GPUArray(backend, zeros(Int32, n)),         # gpu_sorted_order
+        GPUArray(backend, zeros(Int32, ncells)),    # gpu_cell_start
+        GPUArray(backend, zeros(Int32, ncells)),    # gpu_cell_end
         Vector{Int32}(undef, n),           # cpu_cell_ids
         Vector{Int32}(undef, n),           # cpu_sorted_order
         Vector{Int32}(undef, ncells),      # cpu_cell_start
         Vector{Int32}(undef, ncells),      # cpu_cell_end
+        backend
     )
 end
 
-function _make_particles(rng, n, nt, world_size, weights)
+function _make_particles(rng, n, nt, world_size, weights, backend = GPUSelect.Backend())
     # Build species assignments using weighted sampling via cumulative distribution
     cdf = cumsum(weights)
     cdf[end] = 1.0f0  # guard against float rounding
@@ -159,11 +166,11 @@ function _make_particles(rng, n, nt, world_size, weights)
         species[i] = Int32(searchsortedfirst(cdf, r))
     end
     return (
-        MtlArray(rand(rng, Float32, n) .* world_size),
-        MtlArray(rand(rng, Float32, n) .* world_size),
-        MtlArray(zeros(Float32, n)),
-        MtlArray(zeros(Float32, n)),
-        MtlArray(species),
+        GPUArray(backend, rand(rng, Float32, n) .* world_size),
+        GPUArray(backend, rand(rng, Float32, n) .* world_size),
+        GPUArray(backend, zeros(Float32, n)),
+        GPUArray(backend, zeros(Float32, n)),
+        GPUArray(backend, species),
     )
 end
 
