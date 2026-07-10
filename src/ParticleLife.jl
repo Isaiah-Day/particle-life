@@ -1,22 +1,11 @@
 module ParticleLife
 using KernelAbstractions
 using Metal
-
+using GPUSelect
 # GPUArray(backend, T, D) = MtlArray(T,D)
 GPUArray(backend, contents) = MtlArray(contents)
 
-# function get_gpuarray(backend)
-#     if backend isa KernelAbstractions.GPU.MetalBackend
-#         return MtlArray
-#     elseif backend isa KernelAbstractions.GPU.CUDABackend
-#         return CuArray
-#     elseif backend isa KernelAbstractions.CPU
-#         return Array
-#     else
-#         error("Unsupported backend: $backend")
-#     end
-# end
-
+const backend = GPUSelect.Backend()
 
 
 include("physics/model.jl")
@@ -30,6 +19,7 @@ export download_positions!, heatmap, heatmap_slow, get_ptypes
 export ParticleModel, create_model, randomize_matrix!, reset_particles!
 export model_step!
 export find_species
+export frame
 # export find_organisms
 
 end
