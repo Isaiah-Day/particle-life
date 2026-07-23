@@ -14,7 +14,7 @@ mutable struct ParticleModel{}
     py::AbstractVector{Float32}
     vx::AbstractVector{Float32}   # velocities
     vy::AbstractVector{Float32}
-    ptypes::AbstractVector{Int32}   # species index 1..num_types
+    ptypes::AbstractVector{Int32}   # ptypes[par_i] = par_species
     gpu_fx::AbstractVector{Float32}   # forces
     gpu_fy::AbstractVector{Float32}
     gpu_attr::AbstractVector{Float32}   # flattened attraction matrix

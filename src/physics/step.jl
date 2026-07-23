@@ -23,23 +23,23 @@ end
     fy::AbstractVector{Float32},
     px::AbstractVector{Float32},
     py::AbstractVector{Float32},
-    ptypes::AbstractVector{Int32},
+    ptypes::AbstractVector{Int32}, 
     sorted_order::AbstractVector{Int32},
     cell_start::AbstractVector{Int32},
     cell_end::AbstractVector{Int32},
-    attraction::AbstractVector{Float32},
-    n::Int32,
+    attraction::AbstractVector{Float32}, # attraction matrix
+    n::Int32, # number of particles
     num_types::Int32,
-    max_r::Float32,
+    max_r::Float32, # maximum particle interaction radius
     max_r_sq::Float32,
-    half_w::Float32,
+    half_w::Float32, # 1/2 world size
     world_sz::Float32,
     fscale::Float32,
-    beta::Float32,
+    beta::Float32, # min_r / max_r
     inv_beta::Float32,
-    inv_mr::Float32,
-    mid::Float32,
-    inv_hmb::Float32,
+    inv_mr::Float32, # inv max r
+    mid::Float32, # (1 + beta) / 2
+    inv_hmb::Float32, # 2 / (1 - beta)
     grid_w::Int32,
     grid_h::Int32,
 )
